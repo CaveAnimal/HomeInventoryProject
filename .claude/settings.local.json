@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Recurse \"C:\\\\Users\\\\jpful\\\\Documents\\\\Codex\\\\2026-05-31\\\\how-much-work-can-we-do\\\\work\")",
+      "Bash(Select-Object FullName)",
+      "Bash(Get-ChildItem -Recurse \"C:\\\\Users\\\\jpful\\\\Documents\\\\Codex\\\\2026-05-31\\\\how-much-work-can-we-do\\\\outputs\")"
+    ]
+  }
+}

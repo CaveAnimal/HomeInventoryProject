@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="section-heading">
+  <h1>Containers</h1>
+  <a class="button" href="/boxes/new">Add container</a>
+</div>
+<div class="box-grid">
+  {% for box in boxes %}
+  <a class="box-card" href="/boxes/{{ box.id }}">
+    <strong>{{ box.name }}</strong>
+    <span>{{ box.container_type.replace("_", " ").title() }} | {{ box.room_name }}</span>
+    <small>{{ box.item_count }} items | {{ box.photo_count }} photos</small>
+    {% if box.path and box.path != box.name %}<small>{{ box.path }}</small>{% endif %}
+    {% if box.inaccessible %}<em>Inaccessible</em>{% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% endblock %}

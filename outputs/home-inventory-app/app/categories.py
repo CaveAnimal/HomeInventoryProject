@@ -1,0 +1,17 @@
+HOUSEHOLD_CATEGORIES = [
+    "Clothing & Accessories",
+    "Tools & Hardware",
+    "Cables & Electronics",
+    "Kitchen & Dining",
+    "Documents & Paper",
+    "Seasonal & Holiday",
+    "Sports & Camping",
+    "Toys & Games",
+    "Books & Media",
+    "Home Decor",
+    "Cleaning & Household Supplies",
+    "Crafts & Hobbies",
+    "Sentimental / Keepsakes",
+    "Donate / Sell",
+    "Unknown / Needs Review",
+]

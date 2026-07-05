@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if container %}{{ container.name }} — {% endif %}Capture Photos</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/capture.css">
+</head>
+<body>
+  <header class="capture-bar">
+    <a href="/">Home Inventory</a>
+    {% if container %}<span>{{ container.name }}</span>{% endif %}
+  </header>
+
+  <main class="capture-page">
+
+    {% if not container %}
+    <section class="capture-card">
+      <h1>Which container?</h1>
+      <input id="containerSearch" type="search" placeholder="Search containers…" autocomplete="off">
+      <div id="containerList" class="container-pick-list">
+        {% for c in containers %}
+        <a class="container-pick-row" href="/capture/{{ c.public_id }}">
+          <strong>{{ c.name }}</strong>
+          <span>{{ c.container_type.replace("_", " ").title() }} · {{ c.room_name }}</span>
+          {% if c.path and c.path != c.name %}<small>{{ c.path }}</small>{% endif %}
+        </a>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% else %}
+    <section class="capture-card">
+      {% if container.path and container.path != container.name %}
+      <p class="breadcrumb">{{ container.path }}</p>
+      {% endif %}
+      <h1>{{ container.name }}</h1>
+      <p class="capture-hint">Point the camera at the open container from above.</p>
+
+      <label class="capture-btn-wrap" id="captureLabel">
+        <input id="photoInput" type="file" accept="image/*" capture="environment" hidden>
+        <span class="capture-btn" id="captureBtn">Take Photo</span>
+      </label>
+
+      <div id="uploading" class="capture-status" hidden>Uploading…</div>
+      <div id="uploadError" class="capture-status error" hidden>Upload failed. Try again.</div>
+
+      <div id="detectedWrap" hidden>
+        <h2>Detected items</h2>
+        <div id="detectedList" class="detected-list"></div>
+        <p class="capture-hint">Review these on the <a href="/boxes/{{ container.id }}">container page</a>.</p>
+      </div>
+
+      <div id="photoStrip" class="photo-strip"></div>
+
+      <div class="capture-actions">
+        <button id="anotherBtn" class="capture-secondary" hidden>Take Another Photo</button>
+        <a class="capture-secondary-link" href="/boxes/{{ container.id }}">Done — review items</a>
+      </div>
+    </section>
+
+    <script>
+      const boxId = {{ container.id }};
+      const photoInput = document.getElementById("photoInput");
+      const captureLabel = document.getElementById("captureLabel");
+      const captureBtn = document.getElementById("captureBtn");
+      const uploading = document.getElementById("uploading");
+      const uploadError = document.getElementById("uploadError");
+      const detectedWrap = document.getElementById("detectedWrap");
+      const detectedList = document.getElementById("detectedList");
+      const photoStrip = document.getElementById("photoStrip");
+      const anotherBtn = document.getElementById("anotherBtn");
+
+      photoInput.addEventListener("change", async () => {
+        if (!photoInput.files.length) return;
+        captureLabel.hidden = true;
+        uploading.hidden = false;
+        uploadError.hidden = true;
+
+        const data = new FormData();
+        for (const file of photoInput.files) data.append("photos", file);
+
+        const preview = document.createElement("img");
+        preview.src = URL.createObjectURL(photoInput.files[0]);
+        preview.className = "photo-strip-thumb";
+        photoStrip.appendChild(preview);
+
+        try {
+          const res = await fetch(`/api/boxes/${boxId}/photos`, { method: "POST", body: data });
+          uploading.hidden = true;
+          if (!res.ok) throw new Error();
+          const json = await res.json();
+          if (json.suggestions && json.suggestions.length) {
+            detectedWrap.hidden = false;
+            for (const s of json.suggestions) {
+              const row = document.createElement("div");
+              row.className = "detected-row";
+              row.textContent = `${s.name} (${Math.round(s.confidence * 100)}%)`;
+              detectedList.appendChild(row);
+            }
+          }
+          anotherBtn.hidden = false;
+        } catch {
+          uploading.hidden = true;
+          uploadError.hidden = false;
+          captureLabel.hidden = false;
+        }
+        photoInput.value = "";
+      });
+
+      anotherBtn.addEventListener("click", () => {
+        captureLabel.hidden = false;
+        anotherBtn.hidden = true;
+        photoInput.click();
+      });
+    </script>
+    {% endif %}
+
+    {% if not container %}
+    <script>
+      const search = document.getElementById("containerSearch");
+      const rows = document.querySelectorAll(".container-pick-row");
+      search.addEventListener("input", () => {
+        const q = search.value.toLowerCase();
+        rows.forEach(row => {
+          row.hidden = q && !row.textContent.toLowerCase().includes(q);
+        });
+      });
+    </script>
+    {% endif %}
+
+  </main>
+</body>
+</html>

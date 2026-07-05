@@ -1,0 +1,12 @@
+﻿{
+  "name": "copilot-notify",
+  "description": "Send Telegram (or generic webhook) notifications when Copilot invokes tools",
+  "entry": "copilot-notify.js",
+  "trigger": "preToolUse",
+  "config": {
+    "telegramBotToken": "",
+    "telegramChatId": "",
+    "telegramThreadId": "",
+    "webhookUrl": ""
+  }
+}

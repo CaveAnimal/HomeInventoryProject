@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}{{ box.name }}{% endblock %}
+{% block content %}
+<div class="box-detail" data-box-id="{{ box.id }}">
+  <section class="detail-main">
+    <div class="section-heading">
+      <div>
+        {% if box.path and box.path != box.name %}
+        <p class="breadcrumb">{{ box.path }}</p>
+        {% endif %}
+        <h1>{{ box.name }}</h1>
+        <p>{{ box.room_name }} · {{ box.north_ft }} ft from north wall, {{ box.east_ft }} ft from east wall, {{ box.elevation_ft }} ft above floor</p>
+      </div>
+      <a class="button secondary" href="/capture/{{ box.public_id }}">Capture Photos</a>
+      <a class="button secondary" href="/labels?ids={{ box.id }}">Print label</a>
+    </div>
+
+    {% if box.children %}
+    <section class="panel">
+      <h2>Contents</h2>
+      <div class="box-grid">
+        {% for child in box.children %}
+        <a class="box-card" href="/boxes/{{ child.id }}">
+          <strong>{{ child.name }}</strong>
+          <span>{{ child.container_type.replace("_", " ").title() }} | {{ child.room_name }}</span>
+          <small>{{ child.item_count }} items | {{ child.photo_count }} photos</small>
+          {% if child.inaccessible %}<em>Inaccessible</em>{% endif %}
+        </a>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <form class="panel ajax-json" data-method="PATCH" data-url="/api/boxes/{{ box.id }}/location">
+      <h2>Location</h2>
+      <div class="form-row">
+        <label>Room <input name="room_name" value="{{ box.room_name }}"></label>
+        <label>North ft <input name="north_ft" type="number" step="0.1" value="{{ box.north_ft }}"></label>
+        <label>East ft <input name="east_ft" type="number" step="0.1" value="{{ box.east_ft }}"></label>
+        <label>Elevation ft <input name="elevation_ft" type="number" step="0.1" value="{{ box.elevation_ft }}"></label>
+      </div>
+      <button>Save location</button>
+    </form>
+    <section class="panel">
+      <h2>Items</h2>
+      <form class="inline-add" data-add-item>
+        <input name="item_name" required placeholder="Add item manually">
+        <input name="quantity" type="number" min="1" value="1" aria-label="Quantity">
+        <select name="status"><option>confirmed</option><option>likely</option></select>
+        <select name="category" aria-label="Category">
+          <option value="">Category...</option>
+          {% for cat in categories %}<option>{{ cat }}</option>{% endfor %}
+        </select>
+        <button>Add</button>
+      </form>
+      <div class="item-table">
+        {% for item in box["items"] %}
+        <div class="item-row" data-item-id="{{ item.id }}">
+          <input name="item_name" value="{{ item.item_name }}">
+          <input name="quantity" type="number" value="{{ item.quantity }}">
+          <select name="status"><option {% if item.status == "confirmed" %}selected{% endif %}>confirmed</option><option {% if item.status == "likely" %}selected{% endif %}>likely</option></select>
+          <select name="category">
+            <option value="">{{ item.category or "Category..." }}</option>
+            {% for cat in categories %}<option {% if item.category == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
+          </select>
+          <input name="tags" value="{{ item.tags }}" placeholder="tags">
+          <button data-save-item>Save</button>
+          <button data-delete-item>Delete</button>
+          <select data-move-target>
+            <option value="">Move to...</option>
+            {% for other in boxes %}{% if other.id != box.id %}<option value="{{ other.id }}">{{ other.path or other.name }}</option>{% endif %}{% endfor %}
+          </select>
+        </div>
+        {% else %}
+        <p>No confirmed items yet.</p>
+        {% endfor %}
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Suggested from photos</h2>
+      <div class="suggestions">
+        {% for suggestion in box["suggestions"] %}
+        <div data-suggestion-id="{{ suggestion.id }}">
+          <strong>{{ suggestion.item_name }}</strong>
+          <span>{{ "%.0f"|format(suggestion.confidence * 100) }}% · {{ suggestion.category or "uncategorized" }}</span>
+          <button data-confirm-suggestion>Confirm</button>
+          <button data-dismiss-suggestion>Dismiss</button>
+        </div>
+        {% else %}
+        <p>No open suggestions.</p>
+        {% endfor %}
+      </div>
+    </section>
+  </section>
+  <aside class="detail-side">
+    <section class="panel">
+      <h2>QR Label</h2>
+      {% if box["labels"] %}
+      <img class="qr" src="/media/labels/{{ box["labels"][0].filename }}" alt="QR code">
+      {% endif %}
+      <a class="button wide secondary" href="/box/{{ box.public_id }}">Mobile scan view</a>
+    </section>
+    <section class="panel">
+      <h2>Photos</h2>
+      <form data-photo-upload>
+        <input name="photos" type="file" accept="image/*" multiple>
+        <button>Add photos</button>
+      </form>
+      <div class="photo-grid">
+        {% for photo in box["photos"] %}
+        <img src="/media/photos/{{ photo.filename }}" alt="{{ photo.original_filename }}">
+        {% endfor %}
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Container</h2>
+      <form class="ajax-json" data-method="PATCH" data-url="/api/boxes/{{ box.id }}">
+        <label>Type
+          <select name="container_type">
+            <option value="box" {% if box.container_type == "box" %}selected{% endif %}>Box</option>
+            <option value="room" {% if box.container_type == "room" %}selected{% endif %}>Room</option>
+            <option value="garage" {% if box.container_type == "garage" %}selected{% endif %}>Garage</option>
+            <option value="basement" {% if box.container_type == "basement" %}selected{% endif %}>Basement</option>
+            <option value="closet" {% if box.container_type == "closet" %}selected{% endif %}>Closet</option>
+            <option value="shelf" {% if box.container_type == "shelf" %}selected{% endif %}>Shelf</option>
+            <option value="cabinet" {% if box.container_type == "cabinet" %}selected{% endif %}>Cabinet</option>
+            <option value="drawer" {% if box.container_type == "drawer" %}selected{% endif %}>Drawer</option>
+            <option value="tool_chest" {% if box.container_type == "tool_chest" %}selected{% endif %}>Tool chest</option>
+            <option value="bin" {% if box.container_type == "bin" %}selected{% endif %}>Bin</option>
+            <option value="bag" {% if box.container_type == "bag" %}selected{% endif %}>Bag</option>
+            <option value="safe" {% if box.container_type == "safe" %}selected{% endif %}>Safe</option>
+            <option value="area" {% if box.container_type == "area" %}selected{% endif %}>Area</option>
+          </select>
+        </label>
+        <label>Inside
+          <select name="parent_box_id">
+            <option value="">Top level</option>
+            {% for other in boxes %}
+            {% if other.id != box.id %}
+            <option value="{{ other.id }}" {% if box.parent_box_id == other.id %}selected{% endif %}>{{ other.path or other.name }}</option>
+            {% endif %}
+            {% endfor %}
+          </select>
+        </label>
+        <label>Name <input name="name" value="{{ box.name }}"></label>
+        <label>Tags <input name="tags" value="{{ box.tags }}"></label>
+        <label>Notes <textarea name="notes">{{ box.notes }}</textarea></label>
+        <label>Size <input name="size" value="{{ box.size }}"></label>
+        <label>Stack <input name="stack_position" value="{{ box.stack_position }}"></label>
+        <label class="checkbox"><input name="inaccessible" type="checkbox" value="1" {% if box.inaccessible %}checked{% endif %}> Inaccessible</label>
+        <button>Save</button>
+      </form>
+      <hr>
+      <button class="wide secondary" data-delete-container>Delete container</button>
+    </section>
+  </aside>
+</div>
+{% endblock %}
