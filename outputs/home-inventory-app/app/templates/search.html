@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Search Inventory</h1>
+<form class="filters" action="/search">
+  <input name="q" value="{{ q }}" placeholder="Where are extension cords?">
+  <select name="room">
+    <option value="">Any room</option>
+    {% for option in rooms %}<option value="{{ option.room_name }}" {% if room == option.room_name %}selected{% endif %}>{{ option.room_name }}</option>{% endfor %}
+  </select>
+  <input name="tag" value="{{ tag }}" placeholder="tag">
+  <select name="category">
+    <option value="">Any category</option>
+    {% for cat in categories %}<option value="{{ cat }}" {% if category == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
+  </select>
+  <input name="min_confidence" type="number" min="0" max="1" step="0.1" value="{{ min_confidence }}" aria-label="Minimum confidence">
+  <button>Search</button>
+</form>
+<div class="results">
+  {% for item in results %}
+  <a class="result-row" href="/box/{{ item.public_id }}">
+    <strong>{{ item.item_name }}</strong>
+    <span>{{ item.container_path or item.box_name }} · {{ item.room_name }}</span>
+    <small>{{ item.north_ft }} ft from north wall, {{ item.east_ft }} ft from east wall, {{ item.elevation_ft }} ft above floor · {{ item.status }} · qty {{ item.quantity }}</small>
+    {% if item.inaccessible %}<em>Container may be hard to access</em>{% endif %}
+  </a>
+  {% else %}
+  <p>No matching items yet.</p>
+  {% endfor %}
+</div>
+{% if similar %}
+<h2>Where else similar items exist</h2>
+<div class="box-list">
+  {% for item in similar %}
+  <a class="box-card" href="/box/{{ item.public_id }}"><strong>{{ item.item_name }}</strong><span>{{ item.box_name }} · {{ item.room_name }}</span></a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

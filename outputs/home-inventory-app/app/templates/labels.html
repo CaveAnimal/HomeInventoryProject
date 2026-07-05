@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="section-heading no-print">
+  <h1>Print Labels</h1>
+  <button onclick="window.print()">Print</button>
+</div>
+<section class="label-sheet">
+  {% for box in boxes[:4] %}
+  <article class="print-label">
+    <div>
+      <h2>{{ box.name }}</h2>
+      <p>{{ box.room_name }}</p>
+      <p>N {{ box.north_ft }} ft | E {{ box.east_ft }} ft | H {{ box.elevation_ft }} ft</p>
+      <p>Scan for contents</p>
+      <p>{{ box.tags }}</p>
+    </div>
+    {% if box.labels %}
+    <img src="/media/labels/{{ box.labels[0].filename }}" alt="QR for {{ box.name }}">
+    {% endif %}
+  </article>
+  {% endfor %}
+</section>
+{% endblock %}
