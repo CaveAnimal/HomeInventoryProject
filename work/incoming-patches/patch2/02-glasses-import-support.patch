@@ -1,0 +1,690 @@
+From f458da15251ab3e335b785d4e962b6432d0acf08 Mon Sep 17 00:00:00 2001
+From: local <local@local>
+Date: Sun, 5 Jul 2026 21:37:44 +0000
+Subject: [PATCH 2/2] Optional smart-glasses (Ray-Ban Meta) support: photo
+ library upload, import inbox with merged item lists, merge-aware batch
+ confirm
+
+---
+ outputs/home-inventory-app/README.md          |  15 ++
+ outputs/home-inventory-app/app/main.py        | 146 ++++++++++++-
+ outputs/home-inventory-app/app/repository.py  |  19 ++
+ outputs/home-inventory-app/app/settings.py    |   6 +
+ .../home-inventory-app/app/static/capture.css |  15 ++
+ .../app/templates/capture.html                |  22 +-
+ .../app/templates/import.html                 | 197 ++++++++++++++++++
+ .../tests/test_llm_vision.py                  |  99 +++++++++
+ 8 files changed, 507 insertions(+), 12 deletions(-)
+ create mode 100644 outputs/home-inventory-app/app/templates/import.html
+
+diff --git a/outputs/home-inventory-app/README.md b/outputs/home-inventory-app/README.md
+index bf47bbe..fe8f062 100644
+--- a/outputs/home-inventory-app/README.md
++++ b/outputs/home-inventory-app/README.md
+@@ -87,6 +87,21 @@ If the Ollama vision service is unreachable or returns malformed output, the pho
+ - `POST /api/boxes/{id}/photos` — returns `{"suggestions": [...], "vision_error": null|"message"}`; each suggestion has `id`, `name`, `quantity`, `confidence`, `category`, `notes`.
+ - `POST /api/detections/confirm-batch` — body `{"confirm": [{"id": 1, "quantity": 2}], "dismiss": [3]}`.
+ 
++## Smart Glasses (Ray-Ban Meta) Workflow — Optional
++
++There is no way for a local web app to connect directly to Ray-Ban Meta glasses: the glasses pair with your phone, and photos sync through the Meta AI app. Direct camera access for third-party software requires Meta's Wearables Device Access Toolkit, a native iOS/Android SDK currently in developer preview. This app therefore supports glasses through two import paths that work today, plus a documented hook for a future direct integration.
++
++**Path 1 — Photo Library (iPhone, easiest).** Take photos with the glasses; they sync to your camera roll via the Meta AI app. On the capture page, tap **Choose From Library**, multi-select the glasses shots, and they flow through the normal detect → review → confirm pipeline.
++
++**Path 2 — Import inbox (desktop, batch).** Copy or sync glasses photos into the inbox folder (`data/import-inbox` by default, or set `HOME_INVENTORY_IMPORT`). Open `/import`, select photos, choose an existing container or create a new box inline, and click **Import & Generate Item List**. Detections from all photos are merged into a single deduplicated list — same item seen in multiple photos becomes one entry with summed quantity — which you review and confirm in one pass. Imported files are moved out of the inbox into permanent photo storage.
++
++**Path 3 — Direct integration (future).** A companion mobile app built with Meta's Wearables Device Access Toolkit could capture from the glasses and POST directly to this app's API: `POST /api/capture/containers` to create a box, `POST /api/boxes/{id}/photos` to upload and detect, and `POST /api/detections/confirm-batch` to persist. The endpoints already accept exactly what such an app would send.
++
++### Import API
++- `GET /api/import/photos` — list inbox files.
++- `POST /api/import` — body `{"filenames": [...], "box_id": 1}` or `{"filenames": [...], "new_container": {"name": "", "room_name": "attic"}}`, optional `"merge": true` (default). Returns merged suggestions where each entry may carry `merge_ids` (duplicate detections resolved together on confirm).
++- `POST /api/detections/confirm-batch` — confirm entries may include `merge_ids`; duplicates are marked confirmed-by-merge without creating extra inventory rows.
++
+ ## Core Flows
+ 
+ - **Create box from photos:** `Create` page, choose single or batch of four, upload photos, fill location, save.
+diff --git a/outputs/home-inventory-app/app/main.py b/outputs/home-inventory-app/app/main.py
+index 64030b6..cd174d5 100644
+--- a/outputs/home-inventory-app/app/main.py
++++ b/outputs/home-inventory-app/app/main.py
+@@ -25,7 +25,9 @@ from .repository import (
+     get_box,
+     list_boxes,
+     move_box_item,
++    normalize,
+     record_history,
++    resolve_merged_detections,
+     rows,
+     update_box,
+     update_box_item,
+@@ -34,7 +36,7 @@ from .repository import (
+ from .services.labels import generate_qr
+ from .services.search import search_items, similar_items
+ from .services.vision import VisionError, get_provider
+-from .settings import APP_NAME, DATA_DIR, LABEL_DIR, PHOTO_DIR, ensure_dirs
++from .settings import APP_NAME, DATA_DIR, IMPORT_DIR, IMPORT_EXTENSIONS, LABEL_DIR, PHOTO_DIR, ensure_dirs
+ 
+ migrate()
+ ensure_dirs()
+@@ -44,6 +46,7 @@ templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+ app.mount("/media/photos", StaticFiles(directory=PHOTO_DIR), name="photos")
+ app.mount("/media/labels", StaticFiles(directory=LABEL_DIR), name="labels")
++app.mount("/media/inbox", StaticFiles(directory=IMPORT_DIR), name="inbox")
+ 
+ 
+ def db():
+@@ -189,6 +192,132 @@ async def api_capture_create_container(
+     }
+ 
+ 
++@app.get("/import", response_class=HTMLResponse)
++def import_page(request: Request, conn=Depends(db)):
++    """Batch import photos synced from smart glasses (e.g. Ray-Ban Meta)."""
++    return templates.TemplateResponse(
++        "import.html",
++        {"request": request, "photos": list_inbox_photos(), "containers": list_boxes(conn), "inbox_dir": str(IMPORT_DIR)},
++    )
++
++
++def list_inbox_photos() -> list[dict]:
++    photos = []
++    for path in sorted(IMPORT_DIR.iterdir()):
++        if path.is_file() and path.suffix.lower() in IMPORT_EXTENSIONS:
++            photos.append({"filename": path.name, "size_kb": round(path.stat().st_size / 1024, 1)})
++    return photos
++
++
++@app.get("/api/import/photos")
++def api_import_photos():
++    return {"photos": list_inbox_photos(), "inbox_dir": str(IMPORT_DIR)}
++
++
++@app.post("/api/import")
++async def api_import(request: Request, conn=Depends(db)):
++    """Attach inbox photos to a container and generate an item list.
++
++    Body: {"filenames": [...], "box_id": 1}  or
++          {"filenames": [...], "new_container": {"name": "", "room_name": "attic"}}
++    Optional: "merge": true (default) — deduplicate detections across photos
++    into one list entry per item with summed quantities.
++    Photos are moved out of the inbox into permanent photo storage.
++    """
++    data = await request.json()
++    filenames = data.get("filenames") or []
++    if not filenames:
++        raise HTTPException(400, "No filenames provided")
++
++    if data.get("box_id"):
++        box = get_box(conn, box_id=int(data["box_id"]))
++        if not box:
++            raise HTTPException(404, "Container not found")
++        box_id = box["id"]
++    else:
++        new_container = data.get("new_container") or {}
++        box_id = create_box(
++            conn,
++            (new_container.get("name") or "").strip() or None,
++            (new_container.get("room_name") or "").strip() or "unassigned",
++            0, 0, 0,
++            container_type="box",
++        )
++        box = get_box(conn, box_id=box_id)
++        target_url = str(request.url_for("public_box_page", public_id=box["public_id"]))
++        filename = generate_qr(box["public_id"], box["name"], target_url)
++        conn.execute("INSERT INTO labels(box_id, filename, target_url) VALUES (?, ?, ?)", (box_id, filename, target_url))
++        record_history(conn, "label", box_id, "generated", after={"filename": filename, "target_url": target_url})
++
++    provider = get_provider()
++    suggestions: list[dict] = []
++    vision_error: str | None = None
++    imported: list[str] = []
++    for name in filenames:
++        # Reject anything that isn't a plain file directly inside the inbox.
++        safe_name = Path(name).name
++        source = IMPORT_DIR / safe_name
++        if safe_name != name or not source.is_file() or source.suffix.lower() not in IMPORT_EXTENSIONS:
++            raise HTTPException(400, f"Invalid inbox file: {name}")
++        stored_name = f"{uuid.uuid4().hex}{source.suffix.lower()}"
++        destination = PHOTO_DIR / stored_name
++        shutil.move(str(source), str(destination))
++        photo_id = add_photo(conn, box_id, stored_name, safe_name, "")
++        imported.append(safe_name)
++        try:
++            detected = provider.detect(destination, original_name=safe_name)
++        except VisionError as exc:
++            vision_error = str(exc)
++            continue
++        for item in detected:
++            suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
++            suggestions.append(
++                {
++                    "id": suggestion_id,
++                    "name": item.name,
++                    "quantity": item.quantity,
++                    "confidence": item.confidence,
++                    "category": item.category,
++                    "notes": item.notes,
++                }
++            )
++
++    merge = data.get("merge", True)
++    payload = merge_suggestions(suggestions) if merge else suggestions
++    return {
++        "container_id": box_id,
++        "public_id": box["public_id"],
++        "container_name": box["name"],
++        "imported": imported,
++        "merged": bool(merge),
++        "suggestions": payload,
++        "vision_error": vision_error,
++    }
++
++
++def merge_suggestions(suggestions: list[dict]) -> list[dict]:
++    """Deduplicate detections across photos into one entry per item.
++
++    Groups by normalized name; sums quantities; keeps the highest confidence
++    and its category.  ``id`` is the primary suggestion; ``merge_ids`` are the
++    duplicates to resolve alongside it on confirm.
++    """
++    grouped: dict[str, dict] = {}
++    for suggestion in suggestions:
++        key = normalize(suggestion["name"])
++        entry = grouped.get(key)
++        if entry is None:
++            grouped[key] = {**suggestion, "merge_ids": []}
++            continue
++        entry["quantity"] += suggestion["quantity"]
++        entry["merge_ids"].append(suggestion["id"])
++        if suggestion["confidence"] > entry["confidence"]:
++            entry["confidence"] = suggestion["confidence"]
++            entry["category"] = suggestion["category"]
++            entry["name"] = suggestion["name"]
++    return list(grouped.values())
++
++
+ @app.post("/api/boxes/{box_id}/photos")
+ async def api_add_photos(box_id: int, photos: Annotated[list[UploadFile], File()], conn=Depends(db)):
+     if not get_box(conn, box_id=box_id):
+@@ -316,9 +445,12 @@ async def api_confirm_detections_batch(request: Request, conn=Depends(db)):
+     """Mobile capture confirm action (T6/T7/D-002).
+ 
+     Body: {"confirm": [{"id": 1, "quantity": 2}, ...], "dismiss": [3, 4]}
+-    Confirm entries may also be plain ids.  User-confirmed items persist to
+-    ``box_items`` with status 'confirmed'; dismissed suggestions never enter
+-    inventory but stay auditable via detection status + edit history.
++    Confirm entries may also be plain ids.  A confirm entry may include
++    "merge_ids": duplicate suggestions (same item seen in other photos) that
++    are resolved as confirmed-by-merge without creating extra inventory rows.
++    User-confirmed items persist to ``box_items`` with status 'confirmed';
++    dismissed suggestions never enter inventory but stay auditable via
++    detection status + edit history.
+     """
+     data = await request.json()
+     confirmed_items: list[dict] = []
+@@ -327,11 +459,13 @@ async def api_confirm_detections_batch(request: Request, conn=Depends(db)):
+             suggestion_id = int(entry.get("id", 0))
+             quantity = entry.get("quantity")
+             quantity = int(quantity) if quantity is not None else None
++            merge_ids = [int(value) for value in (entry.get("merge_ids") or [])]
+         else:
+-            suggestion_id, quantity = int(entry), None
++            suggestion_id, quantity, merge_ids = int(entry), None, []
+         item_id = confirm_detection(conn, suggestion_id, status="confirmed", quantity=quantity)
+         if item_id is not None:
+-            confirmed_items.append({"suggestion_id": suggestion_id, "item_id": item_id})
++            merged = resolve_merged_detections(conn, merge_ids, item_id, suggestion_id) if merge_ids else 0
++            confirmed_items.append({"suggestion_id": suggestion_id, "item_id": item_id, "merged_duplicates": merged})
+     dismissed = sum(1 for suggestion_id in (data.get("dismiss", []) or []) if dismiss_detection(conn, int(suggestion_id)))
+     return {"confirmed": confirmed_items, "dismissed_count": dismissed}
+ 
+diff --git a/outputs/home-inventory-app/app/repository.py b/outputs/home-inventory-app/app/repository.py
+index 47cd51e..84e7316 100644
+--- a/outputs/home-inventory-app/app/repository.py
++++ b/outputs/home-inventory-app/app/repository.py
+@@ -303,6 +303,25 @@ def dismiss_detection(conn: sqlite3.Connection, suggestion_id: int) -> bool:
+     return True
+ 
+ 
++def resolve_merged_detections(conn: sqlite3.Connection, duplicate_ids: list[int], item_id: int, primary_id: int) -> int:
++    """Mark duplicate suggestions as confirmed-by-merge (no extra box_items).
++
++    Used when several photos of the same container detect the same item and
++    the user confirms them as one row.  Keeps the audit trail accurate:
++    each duplicate is recorded as merged into the primary suggestion's item.
++    Returns how many duplicates were resolved.
++    """
++    resolved = 0
++    for duplicate_id in duplicate_ids:
++        suggestion = row(conn.execute("SELECT * FROM detection_suggestions WHERE id = ?", (duplicate_id,)))
++        if not suggestion or suggestion["status"] != "suggested" or duplicate_id == primary_id:
++            continue
++        conn.execute("UPDATE detection_suggestions SET status = 'confirmed' WHERE id = ?", (duplicate_id,))
++        record_history(conn, "detection", duplicate_id, "merged", after={"box_item_id": item_id, "merged_into_suggestion": primary_id})
++        resolved += 1
++    return resolved
++
++
+ def normalize(value: str) -> str:
+     stop = {"a", "an", "the", "of", "for", "and", "with"}
+     words = re.findall(r"[a-z0-9]+", value.lower())
+diff --git a/outputs/home-inventory-app/app/settings.py b/outputs/home-inventory-app/app/settings.py
+index 85a03c2..b58e4a1 100644
+--- a/outputs/home-inventory-app/app/settings.py
++++ b/outputs/home-inventory-app/app/settings.py
+@@ -6,6 +6,11 @@ DATA_DIR = Path(os.environ.get("HOME_INVENTORY_DATA", APP_ROOT / "data"))
+ PHOTO_DIR = DATA_DIR / "photos"
+ LABEL_DIR = DATA_DIR / "labels"
+ DB_PATH = Path(os.environ.get("HOME_INVENTORY_DB", DATA_DIR / "inventory.sqlite3"))
++# Optional inbox for photos synced from smart glasses (e.g. Ray-Ban Meta).
++# Drop images here (iCloud Photos export, USB copy, sync tool) and use the
++# /import page to attach them to containers and generate item lists.
++IMPORT_DIR = Path(os.environ.get("HOME_INVENTORY_IMPORT", DATA_DIR / "import-inbox"))
++IMPORT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+ VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "heuristic").lower()
+ APP_NAME = "Home Inventory"
+ 
+@@ -14,3 +19,4 @@ def ensure_dirs() -> None:
+     DATA_DIR.mkdir(parents=True, exist_ok=True)
+     PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+     LABEL_DIR.mkdir(parents=True, exist_ok=True)
++    IMPORT_DIR.mkdir(parents=True, exist_ok=True)
+diff --git a/outputs/home-inventory-app/app/static/capture.css b/outputs/home-inventory-app/app/static/capture.css
+index 5864465..25e6bcb 100644
+--- a/outputs/home-inventory-app/app/static/capture.css
++++ b/outputs/home-inventory-app/app/static/capture.css
+@@ -155,3 +155,18 @@
+   margin-top: 0.9rem;
+   width: 100%;
+ }
++
++/* --- Glasses import inbox --- */
++.inbox-thumb {
++  width: 3rem;
++  height: 3rem;
++  object-fit: cover;
++  border-radius: 6px;
++  flex: none;
++}
++#containerSelect, #newContainerFields input {
++  width: 100%;
++  padding: 0.55rem;
++  margin: 0.3rem 0;
++  font-size: 1rem;
++}
+diff --git a/outputs/home-inventory-app/app/templates/capture.html b/outputs/home-inventory-app/app/templates/capture.html
+index b9dc20f..a804881 100644
+--- a/outputs/home-inventory-app/app/templates/capture.html
++++ b/outputs/home-inventory-app/app/templates/capture.html
+@@ -52,6 +52,12 @@
+         <span class="capture-btn" id="captureBtn">Take Photo</span>
+       </label>
+ 
++      <label class="capture-btn-wrap">
++        <input id="libraryInput" type="file" accept="image/*" multiple hidden>
++        <span class="capture-secondary">Choose From Library</span>
++      </label>
++      <p class="capture-hint">Photos taken with smart glasses (Ray-Ban Meta etc.) sync to your camera roll — pick them here.</p>
++
+       <div id="uploading" class="capture-status" hidden>Uploading &amp; detecting…</div>
+       <div id="uploadError" class="capture-status error" hidden>Upload failed. Try again.</div>
+       <div id="visionError" class="capture-status error" hidden></div>
+@@ -75,6 +81,7 @@
+     <script>
+       const boxId = {{ container.id }};
+       const photoInput = document.getElementById("photoInput");
++      const libraryInput = document.getElementById("libraryInput");
+       const captureLabel = document.getElementById("captureLabel");
+       const uploading = document.getElementById("uploading");
+       const uploadError = document.getElementById("uploadError");
+@@ -118,18 +125,18 @@
+         pending[s.id] = { row, checkbox, qtyInput: qty };
+       }
+ 
+-      photoInput.addEventListener("change", async () => {
+-        if (!photoInput.files.length) return;
++      async function uploadFiles(input) {
++        if (!input.files.length) return;
+         captureLabel.hidden = true;
+         uploading.hidden = false;
+         uploadError.hidden = true;
+         visionError.hidden = true;
+ 
+         const data = new FormData();
+-        for (const file of photoInput.files) data.append("photos", file);
++        for (const file of input.files) data.append("photos", file);
+ 
+         const preview = document.createElement("img");
+-        preview.src = URL.createObjectURL(photoInput.files[0]);
++        preview.src = URL.createObjectURL(input.files[0]);
+         preview.className = "photo-strip-thumb";
+         photoStrip.appendChild(preview);
+ 
+@@ -153,8 +160,11 @@
+           uploadError.hidden = false;
+           captureLabel.hidden = false;
+         }
+-        photoInput.value = "";
+-      });
++        input.value = "";
++      }
++
++      photoInput.addEventListener("change", () => uploadFiles(photoInput));
++      libraryInput.addEventListener("change", () => uploadFiles(libraryInput));
+ 
+       confirmBtn.addEventListener("click", async () => {
+         const confirm = [];
+diff --git a/outputs/home-inventory-app/app/templates/import.html b/outputs/home-inventory-app/app/templates/import.html
+new file mode 100644
+index 0000000..9e2e9c4
+--- /dev/null
++++ b/outputs/home-inventory-app/app/templates/import.html
+@@ -0,0 +1,197 @@
++<!doctype html>
++<html lang="en">
++<head>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1">
++  <title>Import Photos — Home Inventory</title>
++  <link rel="stylesheet" href="/static/app.css">
++  <link rel="stylesheet" href="/static/capture.css">
++</head>
++<body>
++  <header class="capture-bar">
++    <a href="/">Home Inventory</a>
++    <span>Import photos</span>
++  </header>
++
++  <main class="capture-page">
++    <section class="capture-card">
++      <h1>Import from inbox</h1>
++      <p class="capture-hint">
++        Photos from smart glasses (e.g. Ray-Ban Meta) or any camera: sync or copy them into
++        <code>{{ inbox_dir }}</code>, then import them here. Detections from all selected photos
++        are merged into one item list for review.
++      </p>
++
++      {% if not photos %}
++      <p class="capture-status">Inbox is empty. Copy image files (.jpg, .png, .webp) into the folder above and refresh.</p>
++      {% else %}
++      <div id="inboxList" class="detected-list">
++        {% for p in photos %}
++        <div class="detected-row inbox-row">
++          <input type="checkbox" checked data-filename="{{ p.filename }}">
++          <img class="inbox-thumb" src="/media/inbox/{{ p.filename }}" alt="">
++          <span class="detected-name">{{ p.filename }}</span>
++          <small class="detected-meta">{{ p.size_kb }} KB</small>
++        </div>
++        {% endfor %}
++      </div>
++
++      <h2>Destination</h2>
++      <select id="containerSelect">
++        <option value="">— Create a new box —</option>
++        {% for c in containers %}
++        <option value="{{ c.id }}">{{ c.name }} ({{ c.room_name }})</option>
++        {% endfor %}
++      </select>
++      <div id="newContainerFields">
++        <input id="newName" type="text" placeholder="New box name (optional — auto-generated)" autocomplete="off">
++        <input id="newRoom" type="text" placeholder="Room (optional)" autocomplete="off">
++      </div>
++
++      <button id="importBtn" class="capture-btn" type="button">Import &amp; Generate Item List</button>
++      <div id="importing" class="capture-status" hidden>Importing &amp; detecting…</div>
++      <div id="importError" class="capture-status error" hidden></div>
++      {% endif %}
++    </section>
++
++    <section class="capture-card" id="resultCard" hidden>
++      <h1 id="resultTitle">Detected items</h1>
++      <p class="capture-hint">Merged across all imported photos. Uncheck wrong items, fix counts, then confirm.</p>
++      <div id="detectedList" class="detected-list"></div>
++      <button id="confirmBtn" class="capture-btn" type="button">Confirm Selected Items</button>
++      <div id="confirmStatus" class="capture-status" hidden></div>
++      <div class="capture-actions">
++        <a id="containerLink" class="capture-secondary-link" href="#">Open container page</a>
++      </div>
++    </section>
++
++    <script>
++      const containerSelect = document.getElementById("containerSelect");
++      const newContainerFields = document.getElementById("newContainerFields");
++      const importBtn = document.getElementById("importBtn");
++      const importing = document.getElementById("importing");
++      const importError = document.getElementById("importError");
++      const resultCard = document.getElementById("resultCard");
++      const resultTitle = document.getElementById("resultTitle");
++      const detectedList = document.getElementById("detectedList");
++      const confirmBtn = document.getElementById("confirmBtn");
++      const confirmStatus = document.getElementById("confirmStatus");
++      const containerLink = document.getElementById("containerLink");
++
++      const pending = {};
++
++      if (containerSelect) {
++        containerSelect.addEventListener("change", () => {
++          newContainerFields.hidden = Boolean(containerSelect.value);
++        });
++      }
++
++      function addDetectionRow(s) {
++        const row = document.createElement("div");
++        row.className = "detected-row";
++        const checkbox = document.createElement("input");
++        checkbox.type = "checkbox";
++        checkbox.checked = true;
++        const label = document.createElement("span");
++        label.className = "detected-name";
++        label.textContent = s.name;
++        const qty = document.createElement("input");
++        qty.type = "number";
++        qty.min = "1";
++        qty.inputMode = "numeric";
++        qty.value = s.quantity || 1;
++        qty.className = "detected-qty";
++        const meta = document.createElement("small");
++        meta.className = "detected-meta";
++        const pct = Math.round((s.confidence || 0) * 100);
++        meta.textContent = s.category ? `${pct}% · ${s.category}` : `${pct}%`;
++        row.append(checkbox, label, qty, meta);
++        detectedList.appendChild(row);
++        pending[s.id] = { row, checkbox, qtyInput: qty, mergeIds: s.merge_ids || [] };
++      }
++
++      if (importBtn) importBtn.addEventListener("click", async () => {
++        const filenames = [...document.querySelectorAll('#inboxList input[type="checkbox"]:checked')]
++          .map(cb => cb.dataset.filename);
++        if (!filenames.length) return;
++        importBtn.disabled = true;
++        importing.hidden = false;
++        importError.hidden = true;
++        const body = { filenames, merge: true };
++        if (containerSelect.value) {
++          body.box_id = Number(containerSelect.value);
++        } else {
++          body.new_container = {
++            name: document.getElementById("newName").value.trim(),
++            room_name: document.getElementById("newRoom").value.trim(),
++          };
++        }
++        try {
++          const res = await fetch("/api/import", {
++            method: "POST",
++            headers: { "Content-Type": "application/json" },
++            body: JSON.stringify(body),
++          });
++          importing.hidden = true;
++          if (!res.ok) throw new Error();
++          const json = await res.json();
++          document.querySelectorAll('#inboxList input[type="checkbox"]:checked')
++            .forEach(cb => cb.closest(".detected-row").remove());
++          resultCard.hidden = false;
++          resultTitle.textContent = `Detected items — ${json.container_name}`;
++          containerLink.href = `/boxes/${json.container_id}`;
++          if (json.vision_error) {
++            importError.textContent = json.vision_error;
++            importError.hidden = false;
++          }
++          for (const s of json.suggestions) addDetectionRow(s);
++          resultCard.scrollIntoView({ behavior: "smooth" });
++        } catch {
++          importing.hidden = true;
++          importError.textContent = "Import failed. Check the files and try again.";
++          importError.hidden = false;
++        }
++        importBtn.disabled = false;
++      });
++
++      confirmBtn.addEventListener("click", async () => {
++        const confirm = [];
++        const dismiss = [];
++        for (const [id, entry] of Object.entries(pending)) {
++          if (entry.checkbox.checked) {
++            confirm.push({
++              id: Number(id),
++              quantity: Math.max(1, Number(entry.qtyInput.value) || 1),
++              merge_ids: entry.mergeIds,
++            });
++          } else {
++            dismiss.push(Number(id), ...entry.mergeIds);
++          }
++        }
++        if (!confirm.length && !dismiss.length) return;
++        confirmBtn.disabled = true;
++        try {
++          const res = await fetch("/api/detections/confirm-batch", {
++            method: "POST",
++            headers: { "Content-Type": "application/json" },
++            body: JSON.stringify({ confirm, dismiss }),
++          });
++          if (!res.ok) throw new Error();
++          const json = await res.json();
++          for (const key of Object.keys(pending)) {
++            pending[key].row.remove();
++            delete pending[key];
++          }
++          confirmStatus.textContent = `Saved ${json.confirmed.length} item(s) to inventory` +
++            (json.dismissed_count ? `, dismissed ${json.dismissed_count}.` : ".");
++          confirmStatus.hidden = false;
++        } catch {
++          confirmStatus.textContent = "Could not save. Try again.";
++          confirmStatus.hidden = false;
++        }
++        confirmBtn.disabled = false;
++      });
++    </script>
++  </main>
++</body>
++</html>
+diff --git a/outputs/home-inventory-app/tests/test_llm_vision.py b/outputs/home-inventory-app/tests/test_llm_vision.py
+index 3a49e82..caa12c9 100644
+--- a/outputs/home-inventory-app/tests/test_llm_vision.py
++++ b/outputs/home-inventory-app/tests/test_llm_vision.py
+@@ -297,3 +297,102 @@ def test_photos_endpoint_reports_vision_error_but_saves_photo(monkeypatch):
+     box = get_box(conn, box_id=box_id)
+     assert len(box["photos"]) == 1, "photo must still be saved when vision fails"
+     conn.close()
++
++
++# ---------------------------------------------------------------------------
++# Glasses import pipeline: inbox -> container -> merged item list
++# ---------------------------------------------------------------------------
++
++def _write_inbox(name: str) -> Path:
++    from app.settings import IMPORT_DIR
++    IMPORT_DIR.mkdir(parents=True, exist_ok=True)
++    path = IMPORT_DIR / name
++    path.write_bytes(b"fake image bytes")
++    return path
++
++
++def test_import_inbox_to_new_container_with_merged_list():
++    reset_db()
++    from app.settings import IMPORT_DIR
++    for leftover in IMPORT_DIR.glob("*"):
++        leftover.unlink()
++    _write_inbox("gloves_scarf.jpg")
++    _write_inbox("gloves_hat.jpg")
++
++    client = TestClient(app)
++    listing = client.get("/api/import/photos").json()
++    assert {p["filename"] for p in listing["photos"]} == {"gloves_scarf.jpg", "gloves_hat.jpg"}
++
++    response = client.post(
++        "/api/import",
++        json={
++            "filenames": ["gloves_scarf.jpg", "gloves_hat.jpg"],
++            "new_container": {"name": "", "room_name": "closet"},
++            "merge": True,
++        },
++    )
++    assert response.status_code == 200
++    body = response.json()
++    assert body["merged"] is True
++    assert sorted(body["imported"]) == ["gloves_hat.jpg", "gloves_scarf.jpg"]
++
++    # "gloves" is detected in both photos and must be merged into one entry
++    # with summed quantity and the duplicate suggestion ids carried along.
++    by_name = {entry["name"]: entry for entry in body["suggestions"]}
++    assert "gloves" in by_name
++    assert by_name["gloves"]["quantity"] == 2
++    assert len(by_name["gloves"]["merge_ids"]) == 1
++
++    # Inbox files are moved into permanent photo storage.
++    assert not any(IMPORT_DIR.glob("*.jpg"))
++    conn = db_conn()
++    box = get_box(conn, box_id=body["container_id"])
++    assert box["container_type"] == "box"
++    assert len(box["photos"]) == 2
++    assert box["labels"]
++    conn.close()
++
++    # Confirming the merged entry creates ONE inventory row and resolves
++    # the duplicate suggestion without creating another.
++    merged = by_name["gloves"]
++    result = client.post(
++        "/api/detections/confirm-batch",
++        json={"confirm": [{"id": merged["id"], "quantity": merged["quantity"], "merge_ids": merged["merge_ids"]}]},
++    ).json()
++    assert result["confirmed"][0]["merged_duplicates"] == 1
++
++    conn = db_conn()
++    items = [row for row in conn.execute("SELECT item_name, quantity FROM box_items WHERE box_id = ?", (body["container_id"],))]
++    gloves_rows = [item for item in items if item["item_name"] == "gloves"]
++    assert len(gloves_rows) == 1
++    assert gloves_rows[0]["quantity"] == 2
++    statuses = [row["status"] for row in conn.execute(
++        "SELECT status FROM detection_suggestions WHERE id IN (?, ?)", (merged["id"], merged["merge_ids"][0])
++    )]
++    assert statuses == ["confirmed", "confirmed"]
++    conn.close()
++
++
++def test_import_rejects_path_traversal_and_unknown_files():
++    reset_db()
++    client = TestClient(app)
++    created = client.post("/api/capture/containers", data={"room_name": "attic"}).json()
++    for bad in ["../secret.jpg", "missing.jpg", "notes.txt"]:
++        response = client.post("/api/import", json={"filenames": [bad], "box_id": created["container_id"]})
++        assert response.status_code == 400, bad
++
++
++def test_import_requires_filenames_and_valid_container():
++    reset_db()
++    client = TestClient(app)
++    assert client.post("/api/import", json={"filenames": []}).status_code == 400
++    _write_inbox("lamp.jpg")
++    assert client.post("/api/import", json={"filenames": ["lamp.jpg"], "box_id": 9999}).status_code == 404
++
++
++def test_import_page_renders():
++    reset_db()
++    client = TestClient(app)
++    response = client.get("/import")
++    assert response.status_code == 200
++    assert "Import from inbox" in response.text
+-- 
+2.43.0
+

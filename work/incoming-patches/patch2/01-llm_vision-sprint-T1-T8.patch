@@ -1,0 +1,1264 @@
+From 5dd35cb6555d8e8404038949e4abc7d1cc1c3fa5 Mon Sep 17 00:00:00 2001
+From: local <local@local>
+Date: Sun, 5 Jul 2026 21:24:45 +0000
+Subject: [PATCH 1/2] llm_vision sprint T1-T8: strict vision contract, hardened
+ Ollama parsing, inline container creation, mobile confirm flow, tests
+
+---
+ docs/AI_Planning/support/llm_vision/TODO.md   |  16 +-
+ outputs/home-inventory-app/README.md          |  16 +
+ outputs/home-inventory-app/app/main.py        | 100 +++++-
+ outputs/home-inventory-app/app/repository.py  |  30 +-
+ .../home-inventory-app/app/services/vision.py | 256 ++++++++++++---
+ .../home-inventory-app/app/static/capture.css |  36 +++
+ .../app/templates/capture.html                | 120 ++++++-
+ .../test_core.cpython-310-pytest-8.3.4.pyc    | Bin 5329 -> 0 bytes
+ .../test_core.cpython-310-pytest-8.4.2.pyc    | Bin 4365 -> 0 bytes
+ .../tests/test_llm_vision.py                  | 299 ++++++++++++++++++
+ 10 files changed, 788 insertions(+), 85 deletions(-)
+ delete mode 100644 outputs/home-inventory-app/tests/__pycache__/test_core.cpython-310-pytest-8.3.4.pyc
+ delete mode 100644 outputs/home-inventory-app/tests/__pycache__/test_core.cpython-310-pytest-8.4.2.pyc
+ create mode 100644 outputs/home-inventory-app/tests/test_llm_vision.py
+
+diff --git a/docs/AI_Planning/support/llm_vision/TODO.md b/docs/AI_Planning/support/llm_vision/TODO.md
+index ab6de6f..9fc7403 100644
+--- a/docs/AI_Planning/support/llm_vision/TODO.md
++++ b/docs/AI_Planning/support/llm_vision/TODO.md
+@@ -10,14 +10,14 @@
+ 
+ | ID | Task | Status | Acceptance Criteria | Depends On |
+ |----|------|--------|---------------------|------------|
+-| T1 | Baseline and branch safety check | not-started | Current app flow documented; smoke run succeeds before changes | None |
+-| T2 | Define strict detection schema contract | not-started | Canonical schema and validation/defaulting rules documented in code comments/tests | T1 |
+-| T3 | Harden Ollama parsing and error handling | not-started | Malformed/non-JSON outputs handled gracefully with user-safe API responses | T2 |
+-| T4 | Add/adjust capture endpoint for inline new container creation | not-started | Mobile flow can create a new container and returns `container_id` + `public_id` with default `box` type | T1 |
+-| T5 | Extend capture UI to show item name + count + confidence + category | not-started | iPhone page renders strict list immediately after upload | T3 |
+-| T6 | Add mobile confirm action from capture page | not-started | User confirms selected detections without leaving capture page | T5 |
+-| T7 | Persist confirmed items and dismissed states with history | not-started | Confirmed rows appear in `box_items`; dismissed suggestions tracked | T6 |
+-| T8 | Add regression tests for end-to-end mobile capture flow | not-started | Tests cover create+upload+detect+confirm+dismiss scenarios | T3, T7 |
++| T1 | Baseline and branch safety check | done | Current app flow documented; smoke run succeeds before changes | None |
++| T2 | Define strict detection schema contract | done | Canonical schema and validation/defaulting rules documented in code comments/tests | T1 |
++| T3 | Harden Ollama parsing and error handling | done | Malformed/non-JSON outputs handled gracefully with user-safe API responses | T2 |
++| T4 | Add/adjust capture endpoint for inline new container creation | done | Mobile flow can create a new container and returns `container_id` + `public_id` with default `box` type | T1 |
++| T5 | Extend capture UI to show item name + count + confidence + category | done | iPhone page renders strict list immediately after upload | T3 |
++| T6 | Add mobile confirm action from capture page | done | User confirms selected detections without leaving capture page | T5 |
++| T7 | Persist confirmed items and dismissed states with history | done | Confirmed rows appear in `box_items`; dismissed suggestions tracked | T6 |
++| T8 | Add regression tests for end-to-end mobile capture flow | done | Tests cover create+upload+detect+confirm+dismiss scenarios | T3, T7 |
+ | T9 | Validate local-network iPhone flow | not-started | Real device test over desktop IP succeeds for at least 2 containers | T7 |
+ | T10 | Update user docs and operational checklist | not-started | README and quickstart include Ollama setup and mobile flow | T9 |
+ 
+diff --git a/outputs/home-inventory-app/README.md b/outputs/home-inventory-app/README.md
+index 3b41a3c..bf47bbe 100644
+--- a/outputs/home-inventory-app/README.md
++++ b/outputs/home-inventory-app/README.md
+@@ -71,6 +71,22 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+ 
+ - `VISION_PROVIDER=openai` is available only if you choose to configure `OPENAI_API_KEY`. It sends images to OpenAI, so leave it off if you want photos to remain entirely local.
+ 
++## Mobile Capture Flow (llm_vision)
++
++The `/capture` page is the iPhone-first entry point:
++
++1. Open `http://YOUR-COMPUTER-IP:8000/capture` on the phone.
++2. Tap **Create & Start Capturing** to make a new container inline (default type `box`, QR label generated automatically), or pick an existing one.
++3. Take a photo. The strict detection list appears on the same page with item name, editable count, confidence, and category.
++4. Uncheck wrong items, fix counts, then tap **Confirm Selected Items**. Confirmed items are saved to inventory with status `confirmed`; unchecked ones are recorded as `dismissed` and never enter inventory. Both are tracked in edit history.
++
++If the Ollama vision service is unreachable or returns malformed output, the photo is still saved and the page shows an actionable error message.
++
++### Key API endpoints
++- `POST /api/capture/containers` — inline container creation; returns `container_id`, `public_id`, `capture_url`.
++- `POST /api/boxes/{id}/photos` — returns `{"suggestions": [...], "vision_error": null|"message"}`; each suggestion has `id`, `name`, `quantity`, `confidence`, `category`, `notes`.
++- `POST /api/detections/confirm-batch` — body `{"confirm": [{"id": 1, "quantity": 2}], "dismiss": [3]}`.
++
+ ## Core Flows
+ 
+ - **Create box from photos:** `Create` page, choose single or batch of four, upload photos, fill location, save.
+diff --git a/outputs/home-inventory-app/app/main.py b/outputs/home-inventory-app/app/main.py
+index 9bab00e..64030b6 100644
+--- a/outputs/home-inventory-app/app/main.py
++++ b/outputs/home-inventory-app/app/main.py
+@@ -21,6 +21,7 @@ from .repository import (
+     confirm_detection,
+     create_box,
+     delete_box_item,
++    dismiss_detection,
+     get_box,
+     list_boxes,
+     move_box_item,
+@@ -32,7 +33,7 @@ from .repository import (
+ )
+ from .services.labels import generate_qr
+ from .services.search import search_items, similar_items
+-from .services.vision import get_provider
++from .services.vision import VisionError, get_provider
+ from .settings import APP_NAME, DATA_DIR, LABEL_DIR, PHOTO_DIR, ensure_dirs
+ 
+ migrate()
+@@ -160,17 +161,52 @@ async def api_create_box(
+     return {"box_id": box_id, "container_id": box_id, "public_id": box["public_id"], "url": f"/boxes/{box_id}", "label_url": f"/media/labels/{filename}"}
+ 
+ 
++@app.post("/api/capture/containers")
++async def api_capture_create_container(
++    request: Request,
++    name: Annotated[str, Form()] = "",
++    room_name: Annotated[str, Form()] = "unassigned",
++    conn=Depends(db),
++):
++    """Create a new container inline from the mobile capture flow (T4/D-004).
++
++    Always creates ``container_type='box'`` in this phase and returns the ids
++    the mobile UI needs to continue capturing without leaving the page.
++    """
++    box_id = create_box(conn, name.strip() or None, room_name.strip() or "unassigned", 0, 0, 0, container_type="box")
++    box = get_box(conn, box_id=box_id)
++    target_url = str(request.url_for("public_box_page", public_id=box["public_id"]))
++    filename = generate_qr(box["public_id"], box["name"], target_url)
++    conn.execute("INSERT INTO labels(box_id, filename, target_url) VALUES (?, ?, ?)", (box_id, filename, target_url))
++    record_history(conn, "label", box_id, "generated", after={"filename": filename, "target_url": target_url})
++    return {
++        "container_id": box_id,
++        "box_id": box_id,
++        "public_id": box["public_id"],
++        "name": box["name"],
++        "container_type": box["container_type"],
++        "capture_url": f"/capture/{box['public_id']}",
++    }
++
++
+ @app.post("/api/boxes/{box_id}/photos")
+ async def api_add_photos(box_id: int, photos: Annotated[list[UploadFile], File()], conn=Depends(db)):
+     if not get_box(conn, box_id=box_id):
+         raise HTTPException(404, "Container not found")
+-    suggestions = await save_photos_and_detect(conn, box_id, photos)
+-    return {"suggestions": suggestions}
++    suggestions, vision_error = await save_photos_and_detect(conn, box_id, photos)
++    return {"suggestions": suggestions, "vision_error": vision_error}
+ 
+ 
+-async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) -> list[dict]:
++async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) -> tuple[list[dict], str | None]:
++    """Store uploads and record strict detections.
++
++    Photos are always persisted.  If the vision provider fails (T3), the
++    user-safe error message is returned instead of raising, so the API
++    response stays actionable and no data is corrupted.
++    """
+     provider = get_provider()
+-    suggestions = []
++    suggestions: list[dict] = []
++    vision_error: str | None = None
+     for upload in photos:
+         if not upload.filename:
+             continue
+@@ -180,10 +216,24 @@ async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) ->
+         with destination.open("wb") as handle:
+             shutil.copyfileobj(upload.file, handle)
+         photo_id = add_photo(conn, box_id, stored_name, upload.filename, upload.content_type or "")
+-        for item in provider.detect(destination):
++        try:
++            detected = provider.detect(destination, original_name=upload.filename)
++        except VisionError as exc:
++            vision_error = str(exc)
++            continue
++        for item in detected:
+             suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
+-            suggestions.append({"id": suggestion_id, "name": item.name, "confidence": item.confidence})
+-    return suggestions
++            suggestions.append(
++                {
++                    "id": suggestion_id,
++                    "name": item.name,
++                    "quantity": item.quantity,
++                    "confidence": item.confidence,
++                    "category": item.category,
++                    "notes": item.notes,
++                }
++            )
++    return suggestions, vision_error
+ 
+ 
+ @app.delete("/api/boxes/{box_id}")
+@@ -248,16 +298,44 @@ async def api_move_item(item_id: int, request: Request, conn=Depends(db)):
+ 
+ @app.post("/api/detections/{suggestion_id}/confirm")
+ def api_confirm_detection(suggestion_id: int, conn=Depends(db)):
+-    return {"item_id": confirm_detection(conn, suggestion_id)}
++    item_id = confirm_detection(conn, suggestion_id)
++    if item_id is None:
++        raise HTTPException(404, "Suggestion not found or already resolved")
++    return {"item_id": item_id}
+ 
+ 
+ @app.delete("/api/detections/{suggestion_id}")
+ def api_dismiss_detection(suggestion_id: int, conn=Depends(db)):
+-    conn.execute("UPDATE detection_suggestions SET status = 'dismissed' WHERE id = ?", (suggestion_id,))
+-    record_history(conn, "detection", suggestion_id, "dismissed")
++    if not dismiss_detection(conn, suggestion_id):
++        raise HTTPException(404, "Suggestion not found or already resolved")
+     return {"ok": True}
+ 
+ 
++@app.post("/api/detections/confirm-batch")
++async def api_confirm_detections_batch(request: Request, conn=Depends(db)):
++    """Mobile capture confirm action (T6/T7/D-002).
++
++    Body: {"confirm": [{"id": 1, "quantity": 2}, ...], "dismiss": [3, 4]}
++    Confirm entries may also be plain ids.  User-confirmed items persist to
++    ``box_items`` with status 'confirmed'; dismissed suggestions never enter
++    inventory but stay auditable via detection status + edit history.
++    """
++    data = await request.json()
++    confirmed_items: list[dict] = []
++    for entry in data.get("confirm", []) or []:
++        if isinstance(entry, dict):
++            suggestion_id = int(entry.get("id", 0))
++            quantity = entry.get("quantity")
++            quantity = int(quantity) if quantity is not None else None
++        else:
++            suggestion_id, quantity = int(entry), None
++        item_id = confirm_detection(conn, suggestion_id, status="confirmed", quantity=quantity)
++        if item_id is not None:
++            confirmed_items.append({"suggestion_id": suggestion_id, "item_id": item_id})
++    dismissed = sum(1 for suggestion_id in (data.get("dismiss", []) or []) if dismiss_detection(conn, int(suggestion_id)))
++    return {"confirmed": confirmed_items, "dismissed_count": dismissed}
++
++
+ @app.post("/api/items/merge")
+ async def api_merge_items(request: Request, conn=Depends(db)):
+     data = await request.json()
+diff --git a/outputs/home-inventory-app/app/repository.py b/outputs/home-inventory-app/app/repository.py
+index c068761..47cd51e 100644
+--- a/outputs/home-inventory-app/app/repository.py
++++ b/outputs/home-inventory-app/app/repository.py
+@@ -264,23 +264,45 @@ def move_box_item(conn: sqlite3.Connection, item_id: int, target_box_id: int) ->
+     record_history(conn, "box_item", item_id, "moved", before=before, after={"box_id": target_box_id})
+ 
+ 
+-def confirm_detection(conn: sqlite3.Connection, suggestion_id: int) -> int:
++def confirm_detection(conn: sqlite3.Connection, suggestion_id: int, status: str = "likely", quantity: int | None = None) -> int | None:
++    """Promote a suggested detection into ``box_items``.
++
++    Returns the new item id, or ``None`` when the suggestion does not exist
++    or is no longer in 'suggested' state (already confirmed/dismissed), so
++    double-taps never create duplicate inventory rows.
++    """
+     suggestion = row(conn.execute("SELECT * FROM detection_suggestions WHERE id = ?", (suggestion_id,)))
++    if not suggestion or suggestion["status"] != "suggested":
++        return None
++    final_quantity = max(1, int(quantity)) if quantity is not None else suggestion["quantity"]
+     item_id = add_item_to_box(
+         conn,
+         suggestion["box_id"],
+         suggestion["item_name"],
+-        quantity=suggestion["quantity"],
+-        status="likely",
++        quantity=final_quantity,
++        status=status,
+         confidence=suggestion["confidence"],
+         category=suggestion["category"] or "",
+         notes=suggestion["notes"] or "",
+     )
+     conn.execute("UPDATE detection_suggestions SET status = 'confirmed' WHERE id = ?", (suggestion_id,))
+-    record_history(conn, "detection", suggestion_id, "confirmed", after={"box_item_id": item_id})
++    record_history(conn, "detection", suggestion_id, "confirmed", after={"box_item_id": item_id, "quantity": final_quantity})
+     return item_id
+ 
+ 
++def dismiss_detection(conn: sqlite3.Connection, suggestion_id: int) -> bool:
++    """Mark a suggestion dismissed (auditable; never enters box_items).
++
++    Returns False when the suggestion does not exist or was already resolved.
++    """
++    suggestion = row(conn.execute("SELECT * FROM detection_suggestions WHERE id = ?", (suggestion_id,)))
++    if not suggestion or suggestion["status"] != "suggested":
++        return False
++    conn.execute("UPDATE detection_suggestions SET status = 'dismissed' WHERE id = ?", (suggestion_id,))
++    record_history(conn, "detection", suggestion_id, "dismissed", before={"item_name": suggestion["item_name"]})
++    return True
++
++
+ def normalize(value: str) -> str:
+     stop = {"a", "an", "the", "of", "for", "and", "with"}
+     words = re.findall(r"[a-z0-9]+", value.lower())
+diff --git a/outputs/home-inventory-app/app/services/vision.py b/outputs/home-inventory-app/app/services/vision.py
+index 31ceeb4..161007a 100644
+--- a/outputs/home-inventory-app/app/services/vision.py
++++ b/outputs/home-inventory-app/app/services/vision.py
+@@ -1,3 +1,30 @@
++"""Vision providers and the strict detection contract.
++
++STRICT DETECTION SCHEMA CONTRACT (T2 / D-003)
++=============================================
++Every provider must return ``list[DetectedItem]`` where each item satisfies:
++
++    name        non-empty str, whitespace-trimmed, max 120 chars (required;
++                items without a usable name are dropped)
++    quantity    int >= 1 (defaults to 1; floats truncated; invalid -> 1)
++    confidence  float clamped to [0.0, 1.0] (defaults to 0.5; invalid -> 0.5)
++    category    one of ``HOUSEHOLD_CATEGORIES`` (case-insensitive match is
++                normalized to canonical casing; anything else becomes
++                "Unknown / Needs Review")
++    notes       str, max 500 chars (defaults to "")
++
++``normalize_detection`` is the single source of truth for these
++validation/defaulting rules and is unit-tested for valid, partial, and
++malformed inputs.
++
++ERROR HANDLING CONTRACT (T3)
++============================
++Providers raise ``VisionError`` with a user-safe message when detection cannot
++proceed (runtime unreachable, model missing, malformed/non-JSON output in
++strict mode).  Callers surface the message without corrupting stored data:
++photos are still saved, only suggestions are skipped.
++"""
++
+ from __future__ import annotations
+ 
+ import base64
+@@ -12,6 +39,18 @@ import requests
+ from ..categories import HOUSEHOLD_CATEGORIES
+ from ..settings import VISION_PROVIDER
+ 
++FALLBACK_CATEGORY = "Unknown / Needs Review"
++MAX_NAME_LENGTH = 120
++MAX_NOTES_LENGTH = 500
++_CANONICAL_CATEGORIES = {category.lower(): category for category in HOUSEHOLD_CATEGORIES}
++
++
++class VisionError(Exception):
++    """Raised when a provider cannot produce a valid detection list.
++
++    The message is safe to show directly to the user.
++    """
++
+ 
+ @dataclass
+ class DetectedItem:
+@@ -22,8 +61,112 @@ class DetectedItem:
+     notes: str = ""
+ 
+ 
++def normalize_detection(raw: object) -> DetectedItem | None:
++    """Normalize one raw detection dict into the strict contract.
++
++    Returns ``None`` when the entry is unusable (not a dict, or no name).
++    Never raises for bad field values; it defaults/clamps them instead.
++    """
++    if not isinstance(raw, dict):
++        return None
++    name = str(raw.get("name") or "").strip()[:MAX_NAME_LENGTH]
++    if not name:
++        return None
++    return DetectedItem(
++        name=name,
++        quantity=_coerce_quantity(raw.get("quantity")),
++        confidence=_coerce_confidence(raw.get("confidence")),
++        category=_coerce_category(raw.get("category")),
++        notes=str(raw.get("notes") or "").strip()[:MAX_NOTES_LENGTH],
++    )
++
++
++def _coerce_quantity(value: object) -> int:
++    try:
++        quantity = int(float(value))  # accepts "3", 3.0, 3
++    except (TypeError, ValueError):
++        return 1
++    return max(1, quantity)
++
++
++def _coerce_confidence(value: object) -> float:
++    try:
++        confidence = float(value)
++    except (TypeError, ValueError):
++        return 0.5
++    if confidence != confidence:  # NaN guard
++        return 0.5
++    # Some models emit percentages (e.g. 85 instead of 0.85).
++    if 1.0 < confidence <= 100.0:
++        confidence = confidence / 100.0
++    return min(1.0, max(0.0, confidence))
++
++
++def _coerce_category(value: object) -> str:
++    category = str(value or "").strip()
++    if not category:
++        return FALLBACK_CATEGORY
++    return _CANONICAL_CATEGORIES.get(category.lower(), FALLBACK_CATEGORY)
++
++
++def extract_json_payload(text: str) -> dict | list:
++    """Extract the first JSON object/array from model output.
++
++    Handles common model quirks: markdown code fences, leading prose, and
++    trailing commentary.  Raises ``ValueError`` when no valid JSON is found.
++    """
++    if not text or not text.strip():
++        raise ValueError("empty response")
++    cleaned = re.sub(r"```(?:json)?", "", text).strip()
++    decoder = json.JSONDecoder()
++    for match in re.finditer(r"[\{\[]", cleaned):
++        try:
++            payload, _ = decoder.raw_decode(cleaned[match.start():])
++        except json.JSONDecodeError:
++            continue
++        if isinstance(payload, (dict, list)):
++            return payload
++    raise ValueError("no JSON object found in response")
++
++
++def parse_detection_json(text: str, strict: bool = False) -> list[DetectedItem]:
++    """Parse model output text into strict ``DetectedItem`` rows.
++
++    In non-strict mode (legacy behavior) malformed input returns ``[]``.
++    In strict mode (T3) malformed or shapeless input raises ``VisionError``
++    with a user-safe message so the API can respond gracefully.
++    """
++    try:
++        payload = extract_json_payload(text)
++    except ValueError:
++        if strict:
++            raise VisionError(
++                "The vision model returned output that could not be read as JSON. "
++                "Try taking the photo again."
++            )
++        return []
++    if isinstance(payload, dict):
++        items = payload.get("items", [])
++    else:
++        items = payload
++    if not isinstance(items, list):
++        if strict:
++            raise VisionError(
++                "The vision model returned an unexpected format. Try taking the photo again."
++            )
++        return []
++    detected = [item for item in (normalize_detection(raw) for raw in items) if item]
++    return detected
++
++
+ class VisionProvider:
+-    def detect(self, image_path: Path) -> list[DetectedItem]:
++    def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
++        """Detect items in the photo at ``image_path``.
++
++        ``original_name`` is the filename as uploaded by the user; stored
++        files are renamed to opaque UUIDs, so filename-based providers must
++        use this hint instead of ``image_path``.
++        """
+         raise NotImplementedError
+ 
+ 
+@@ -49,11 +192,12 @@ class HeuristicVisionProvider(VisionProvider):
+         "Donate / Sell": {"donate", "sell", "thrift", "giveaway"},
+     }
+ 
+-    def detect(self, image_path: Path) -> list[DetectedItem]:
+-        stem = re.sub(r"[_-]+", " ", image_path.stem.lower())
++    def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
++        source = Path(original_name).stem if original_name else image_path.stem
++        stem = re.sub(r"[_-]+", " ", source.lower())
+         tokens = [token for token in re.findall(r"[a-z0-9]+", stem) if token not in self.common_words and not token.isdigit()]
+         if not tokens:
+-            return [DetectedItem("unidentified item", confidence=0.25, notes="No local vision provider configured.")]
++            return [DetectedItem("unidentified item", confidence=0.25, category=FALLBACK_CATEGORY, notes="No local vision provider configured.")]
+         phrases = []
+         if len(tokens) >= 2:
+             phrases.append(" ".join(tokens[:3]))
+@@ -73,7 +217,7 @@ class HeuristicVisionProvider(VisionProvider):
+         for category, keywords in self.category_keywords.items():
+             if words & keywords:
+                 return category
+-        return "Unknown / Needs Review"
++        return FALLBACK_CATEGORY
+ 
+ 
+ class OllamaVisionProvider(VisionProvider):
+@@ -81,29 +225,60 @@ class OllamaVisionProvider(VisionProvider):
+         self.url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+         self.model = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
+ 
+-    def detect(self, image_path: Path) -> list[DetectedItem]:
++    def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
+         cats = ", ".join(f'"{c}"' for c in HOUSEHOLD_CATEGORIES)
+         prompt = (
+-            "Identify physical objects visible in this storage box photo. "
+-            f"Use one of these categories: {cats}. "
+-            "Return only JSON: {\"items\":[{\"name\":\"...\",\"quantity\":1,\"confidence\":0.0,\"category\":\"...\",\"notes\":\"...\"}]}"
++            "You are creating a strict home inventory from one photo of an open storage container. "
++            "List each distinct physical object you can see, with a count. "
++            f"category MUST be exactly one of: {cats}. "
++            "confidence is a number between 0 and 1. "
++            'Respond with ONLY this JSON, no prose, no markdown: '
++            '{"items":[{"name":"...","quantity":1,"confidence":0.0,"category":"...","notes":"..."}]}'
+         )
+         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+-        response = requests.post(
+-            self.url,
+-            json={"model": self.model, "prompt": prompt, "images": [encoded], "stream": False},
+-            timeout=90,
+-        )
+-        response.raise_for_status()
+-        text = response.json().get("response", "{}")
+-        return parse_detection_json(text)
++        try:
++            response = requests.post(
++                self.url,
++                json={
++                    "model": self.model,
++                    "prompt": prompt,
++                    "images": [encoded],
++                    "stream": False,
++                    "format": "json",
++                },
++                timeout=120,
++            )
++            response.raise_for_status()
++        except requests.exceptions.ConnectionError as exc:
++            raise VisionError(
++                "Could not reach the local Ollama service. Make sure Ollama is running "
++                "on the desktop host, then try again."
++            ) from exc
++        except requests.exceptions.Timeout as exc:
++            raise VisionError(
++                "The vision model took too long to respond. Try again with a smaller or clearer photo."
++            ) from exc
++        except requests.exceptions.RequestException as exc:
++            status = getattr(getattr(exc, "response", None), "status_code", None)
++            if status == 404:
++                raise VisionError(
++                    f"The Ollama model '{self.model}' was not found. "
++                    f"Run: ollama pull {self.model}"
++                ) from exc
++            raise VisionError("The vision service returned an error. Check the Ollama logs and try again.") from exc
++        try:
++            body = response.json()
++        except ValueError as exc:
++            raise VisionError("The vision service returned an unreadable response. Try again.") from exc
++        text = body.get("response", "")
++        return parse_detection_json(text, strict=True)
+ 
+ 
+ class OpenAIVisionProvider(VisionProvider):
+-    def detect(self, image_path: Path) -> list[DetectedItem]:
++    def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
+         api_key = os.environ.get("OPENAI_API_KEY")
+         if not api_key:
+-            return HeuristicVisionProvider().detect(image_path)
++            return HeuristicVisionProvider().detect(image_path, original_name)
+         mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+         data_url = f"data:{mime};base64,{base64.b64encode(image_path.read_bytes()).decode('ascii')}"
+         payload = {
+@@ -116,43 +291,20 @@ class OpenAIVisionProvider(VisionProvider):
+                 ],
+             }],
+         }
+-        response = requests.post(
+-            "https://api.openai.com/v1/responses",
+-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+-            json=payload,
+-            timeout=90,
+-        )
+-        response.raise_for_status()
++        try:
++            response = requests.post(
++                "https://api.openai.com/v1/responses",
++                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
++                json=payload,
++                timeout=90,
++            )
++            response.raise_for_status()
++        except requests.exceptions.RequestException as exc:
++            raise VisionError("The cloud vision service could not be reached. Try again later.") from exc
+         text = json.dumps(response.json())
+         return parse_detection_json(text)
+ 
+ 
+-def parse_detection_json(text: str) -> list[DetectedItem]:
+-    match = re.search(r"\{.*\}", text, re.S)
+-    if not match:
+-        return []
+-    try:
+-        data = json.loads(match.group(0))
+-    except json.JSONDecodeError:
+-        return []
+-    items = data.get("items", [])
+-    detected = []
+-    for item in items:
+-        name = str(item.get("name", "")).strip()
+-        if not name:
+-            continue
+-        detected.append(
+-            DetectedItem(
+-                name=name,
+-                quantity=max(1, int(item.get("quantity") or 1)),
+-                confidence=float(item.get("confidence") or 0.5),
+-                category=str(item.get("category") or ""),
+-                notes=str(item.get("notes") or ""),
+-            )
+-        )
+-    return detected
+-
+-
+ def get_provider() -> VisionProvider:
+     if VISION_PROVIDER == "ollama":
+         return OllamaVisionProvider()
+diff --git a/outputs/home-inventory-app/app/static/capture.css b/outputs/home-inventory-app/app/static/capture.css
+index e9b1d72..5864465 100644
+--- a/outputs/home-inventory-app/app/static/capture.css
++++ b/outputs/home-inventory-app/app/static/capture.css
+@@ -119,3 +119,39 @@
+   text-decoration: underline;
+   text-underline-offset: 3px;
+ }
++
++/* --- Strict detection review (llm_vision sprint) --- */
++.detected-row {
++  display: flex;
++  align-items: center;
++  gap: 0.6rem;
++  padding: 0.55rem 0.25rem;
++  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
++}
++.detected-row input[type="checkbox"] {
++  width: 1.35rem;
++  height: 1.35rem;
++  flex: none;
++}
++.detected-name {
++  flex: 1;
++  min-width: 0;
++  overflow-wrap: anywhere;
++}
++.detected-qty {
++  width: 3.6rem;
++  flex: none;
++  padding: 0.35rem;
++  text-align: center;
++  font-size: 1rem;
++}
++.detected-meta {
++  flex: none;
++  color: #667;
++  max-width: 9rem;
++  text-align: right;
++}
++#confirmBtn {
++  margin-top: 0.9rem;
++  width: 100%;
++}
+diff --git a/outputs/home-inventory-app/app/templates/capture.html b/outputs/home-inventory-app/app/templates/capture.html
+index 1d1cecf..b9dc20f 100644
+--- a/outputs/home-inventory-app/app/templates/capture.html
++++ b/outputs/home-inventory-app/app/templates/capture.html
+@@ -17,7 +17,16 @@
+ 
+     {% if not container %}
+     <section class="capture-card">
+-      <h1>Which container?</h1>
++      <h1>Start a new box</h1>
++      <p class="capture-hint">Creates a new container (type: box) so you can photograph it right away.</p>
++      <input id="newName" type="text" placeholder="Name (optional — auto-generated)" autocomplete="off">
++      <input id="newRoom" type="text" placeholder="Room (optional)" autocomplete="off">
++      <button id="createBtn" class="capture-btn" type="button">Create &amp; Start Capturing</button>
++      <div id="createError" class="capture-status error" hidden>Could not create the container. Try again.</div>
++    </section>
++
++    <section class="capture-card">
++      <h1>…or pick an existing container</h1>
+       <input id="containerSearch" type="search" placeholder="Search containers…" autocomplete="off">
+       <div id="containerList" class="container-pick-list">
+         {% for c in containers %}
+@@ -43,13 +52,16 @@
+         <span class="capture-btn" id="captureBtn">Take Photo</span>
+       </label>
+ 
+-      <div id="uploading" class="capture-status" hidden>Uploading…</div>
++      <div id="uploading" class="capture-status" hidden>Uploading &amp; detecting…</div>
+       <div id="uploadError" class="capture-status error" hidden>Upload failed. Try again.</div>
++      <div id="visionError" class="capture-status error" hidden></div>
+ 
+       <div id="detectedWrap" hidden>
+         <h2>Detected items</h2>
++        <p class="capture-hint">Uncheck anything wrong, fix counts, then confirm. Only confirmed items enter your inventory.</p>
+         <div id="detectedList" class="detected-list"></div>
+-        <p class="capture-hint">Review these on the <a href="/boxes/{{ container.id }}">container page</a>.</p>
++        <button id="confirmBtn" class="capture-btn" type="button">Confirm Selected Items</button>
++        <div id="confirmStatus" class="capture-status" hidden></div>
+       </div>
+ 
+       <div id="photoStrip" class="photo-strip"></div>
+@@ -64,19 +76,54 @@
+       const boxId = {{ container.id }};
+       const photoInput = document.getElementById("photoInput");
+       const captureLabel = document.getElementById("captureLabel");
+-      const captureBtn = document.getElementById("captureBtn");
+       const uploading = document.getElementById("uploading");
+       const uploadError = document.getElementById("uploadError");
++      const visionError = document.getElementById("visionError");
+       const detectedWrap = document.getElementById("detectedWrap");
+       const detectedList = document.getElementById("detectedList");
++      const confirmBtn = document.getElementById("confirmBtn");
++      const confirmStatus = document.getElementById("confirmStatus");
+       const photoStrip = document.getElementById("photoStrip");
+       const anotherBtn = document.getElementById("anotherBtn");
+ 
++      // pending[id] = { row, checkbox, qtyInput }
++      const pending = {};
++
++      function addDetectionRow(s) {
++        const row = document.createElement("div");
++        row.className = "detected-row";
++
++        const checkbox = document.createElement("input");
++        checkbox.type = "checkbox";
++        checkbox.checked = true;
++
++        const label = document.createElement("span");
++        label.className = "detected-name";
++        label.textContent = s.name;
++
++        const qty = document.createElement("input");
++        qty.type = "number";
++        qty.min = "1";
++        qty.inputMode = "numeric";
++        qty.value = s.quantity || 1;
++        qty.className = "detected-qty";
++
++        const meta = document.createElement("small");
++        meta.className = "detected-meta";
++        const pct = Math.round((s.confidence || 0) * 100);
++        meta.textContent = s.category ? `${pct}% · ${s.category}` : `${pct}%`;
++
++        row.append(checkbox, label, qty, meta);
++        detectedList.appendChild(row);
++        pending[s.id] = { row, checkbox, qtyInput: qty };
++      }
++
+       photoInput.addEventListener("change", async () => {
+         if (!photoInput.files.length) return;
+         captureLabel.hidden = true;
+         uploading.hidden = false;
+         uploadError.hidden = true;
++        visionError.hidden = true;
+ 
+         const data = new FormData();
+         for (const file of photoInput.files) data.append("photos", file);
+@@ -91,14 +138,14 @@
+           uploading.hidden = true;
+           if (!res.ok) throw new Error();
+           const json = await res.json();
++          if (json.vision_error) {
++            visionError.textContent = json.vision_error;
++            visionError.hidden = false;
++          }
+           if (json.suggestions && json.suggestions.length) {
+             detectedWrap.hidden = false;
+-            for (const s of json.suggestions) {
+-              const row = document.createElement("div");
+-              row.className = "detected-row";
+-              row.textContent = `${s.name} (${Math.round(s.confidence * 100)}%)`;
+-              detectedList.appendChild(row);
+-            }
++            confirmStatus.hidden = true;
++            for (const s of json.suggestions) addDetectionRow(s);
+           }
+           anotherBtn.hidden = false;
+         } catch {
+@@ -109,6 +156,40 @@
+         photoInput.value = "";
+       });
+ 
++      confirmBtn.addEventListener("click", async () => {
++        const confirm = [];
++        const dismiss = [];
++        for (const [id, entry] of Object.entries(pending)) {
++          if (entry.checkbox.checked) {
++            confirm.push({ id: Number(id), quantity: Math.max(1, Number(entry.qtyInput.value) || 1) });
++          } else {
++            dismiss.push(Number(id));
++          }
++        }
++        if (!confirm.length && !dismiss.length) return;
++        confirmBtn.disabled = true;
++        try {
++          const res = await fetch("/api/detections/confirm-batch", {
++            method: "POST",
++            headers: { "Content-Type": "application/json" },
++            body: JSON.stringify({ confirm, dismiss }),
++          });
++          if (!res.ok) throw new Error();
++          const json = await res.json();
++          for (const key of Object.keys(pending)) {
++            pending[key].row.remove();
++            delete pending[key];
++          }
++          confirmStatus.textContent = `Saved ${json.confirmed.length} item(s) to inventory` +
++            (json.dismissed_count ? `, dismissed ${json.dismissed_count}.` : ".");
++          confirmStatus.hidden = false;
++        } catch {
++          confirmStatus.textContent = "Could not save. Check your connection and try again.";
++          confirmStatus.hidden = false;
++        }
++        confirmBtn.disabled = false;
++      });
++
+       anotherBtn.addEventListener("click", () => {
+         captureLabel.hidden = false;
+         anotherBtn.hidden = true;
+@@ -127,6 +208,25 @@
+           row.hidden = q && !row.textContent.toLowerCase().includes(q);
+         });
+       });
++
++      const createBtn = document.getElementById("createBtn");
++      const createError = document.getElementById("createError");
++      createBtn.addEventListener("click", async () => {
++        createBtn.disabled = true;
++        createError.hidden = true;
++        const data = new FormData();
++        data.append("name", document.getElementById("newName").value.trim());
++        data.append("room_name", document.getElementById("newRoom").value.trim() || "unassigned");
++        try {
++          const res = await fetch("/api/capture/containers", { method: "POST", body: data });
++          if (!res.ok) throw new Error();
++          const json = await res.json();
++          window.location.href = json.capture_url;
++        } catch {
++          createError.hidden = false;
++          createBtn.disabled = false;
++        }
++      });
+     </script>
+     {% endif %}
+ 
+diff --git a/outputs/home-inventory-app/tests/__pycache__/test_core.cpython-310-pytest-8.3.4.pyc b/outputs/home-inventory-app/tests/__pycache__/test_core.cpython-310-pytest-8.3.4.pyc
+deleted file mode 100644
+index afa952d2b9f91fe4ec18e8333a9906ffa7c00b9d..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 5329
+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
+MrjvChol3FvZ|77#m;e9(
+
+diff --git a/outputs/home-inventory-app/tests/__pycache__/test_core.cpython-310-pytest-8.4.2.pyc b/outputs/home-inventory-app/tests/__pycache__/test_core.cpython-310-pytest-8.4.2.pyc
+deleted file mode 100644
+index e627d42a9f93e63c877c7f5685f166fac6febc07..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 4365
+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
+
+diff --git a/outputs/home-inventory-app/tests/test_llm_vision.py b/outputs/home-inventory-app/tests/test_llm_vision.py
+new file mode 100644
+index 0000000..3a49e82
+--- /dev/null
++++ b/outputs/home-inventory-app/tests/test_llm_vision.py
+@@ -0,0 +1,299 @@
++"""Regression tests for the llm_vision sprint (T2, T3, T4, T6, T7 / TODO T8).
++
++Covers:
++- Strict detection schema normalization (valid, partial, malformed fields).
++- Robust JSON extraction from noisy model output.
++- Strict-mode error handling for malformed / non-JSON output.
++- Inline container creation from the mobile capture flow.
++- End-to-end: create -> upload -> detect -> confirm/dismiss -> persist + audit.
++- Graceful API response when the vision provider fails.
++"""
++
++import os
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++
++os.environ["HOME_INVENTORY_DATA"] = str(ROOT / "test-data")
++os.environ["HOME_INVENTORY_DB"] = str(ROOT / "test-data" / "test.sqlite3")
++os.environ["VISION_PROVIDER"] = "heuristic"
++
++import pytest
++from fastapi.testclient import TestClient
++
++from app.database import connect, migrate
++from app.main import app
++from app.repository import confirm_detection, dismiss_detection, get_box
++from app.services import vision
++from app.services.vision import (
++    DetectedItem,
++    VisionError,
++    extract_json_payload,
++    normalize_detection,
++    parse_detection_json,
++)
++
++
++def reset_db():
++    db_path = Path(os.environ["HOME_INVENTORY_DB"])
++    if db_path.exists():
++        db_path.unlink()
++    migrate(db_path)
++
++
++def db_conn():
++    return connect(Path(os.environ["HOME_INVENTORY_DB"]))
++
++
++# ---------------------------------------------------------------------------
++# T2: strict schema normalization
++# ---------------------------------------------------------------------------
++
++def test_normalize_detection_valid_full_item():
++    item = normalize_detection(
++        {"name": " Winter Gloves ", "quantity": 2, "confidence": 0.87, "category": "Clothing & Accessories", "notes": "left side"}
++    )
++    assert item == DetectedItem("Winter Gloves", 2, 0.87, "Clothing & Accessories", "left side")
++
++
++def test_normalize_detection_partial_fields_get_defaults():
++    item = normalize_detection({"name": "mystery cable"})
++    assert item.quantity == 1
++    assert item.confidence == 0.5
++    assert item.category == "Unknown / Needs Review"
++    assert item.notes == ""
++
++
++def test_normalize_detection_bad_values_are_clamped():
++    item = normalize_detection(
++        {"name": "hammer", "quantity": "-3", "confidence": 500, "category": "Made Up Category", "notes": None}
++    )
++    assert item.quantity == 1
++    assert item.confidence == 1.0  # >100 is not a percentage; clamped to [0, 1]
++    assert item.category == "Unknown / Needs Review"
++    negative = normalize_detection({"name": "hammer", "confidence": -0.3})
++    assert negative.confidence == 0.0
++    garbage = normalize_detection({"name": "hammer", "quantity": "many", "confidence": "high"})
++    assert garbage.quantity == 1 and garbage.confidence == 0.5
++
++
++def test_normalize_detection_percent_confidence_is_scaled():
++    item = normalize_detection({"name": "mug", "confidence": 85})
++    assert item.confidence == 0.85
++
++
++def test_normalize_detection_category_case_insensitive_canonicalized():
++    item = normalize_detection({"name": "mug", "category": "kitchen & dining"})
++    assert item.category == "Kitchen & Dining"
++
++
++def test_normalize_detection_rejects_nameless_or_non_dict():
++    assert normalize_detection({"quantity": 3}) is None
++    assert normalize_detection({"name": "   "}) is None
++    assert normalize_detection("not a dict") is None
++    assert normalize_detection(None) is None
++
++
++def test_normalize_detection_truncates_long_fields():
++    item = normalize_detection({"name": "x" * 500, "notes": "y" * 2000})
++    assert len(item.name) == 120
++    assert len(item.notes) == 500
++
++
++# ---------------------------------------------------------------------------
++# T3: robust JSON extraction and strict parsing
++# ---------------------------------------------------------------------------
++
++def test_extract_json_from_markdown_fence_and_prose():
++    text = 'Sure! Here is the inventory:\n```json\n{"items": [{"name": "lamp"}]}\n```\nHope that helps.'
++    payload = extract_json_payload(text)
++    assert payload == {"items": [{"name": "lamp"}]}
++
++
++def test_parse_detection_json_valid():
++    items = parse_detection_json('{"items":[{"name":"tent","quantity":1,"confidence":0.9,"category":"Sports & Camping","notes":""}]}')
++    assert len(items) == 1
++    assert items[0].name == "tent"
++    assert items[0].category == "Sports & Camping"
++
++
++def test_parse_detection_json_accepts_bare_list():
++    items = parse_detection_json('[{"name": "book", "quantity": 4}]')
++    assert items[0].quantity == 4
++
++
++def test_parse_detection_json_skips_malformed_entries():
++    items = parse_detection_json('{"items": [{"name": "vase"}, {"quantity": 9}, "junk"]}')
++    assert [item.name for item in items] == ["vase"]
++
++
++def test_parse_detection_json_non_strict_returns_empty_on_garbage():
++    assert parse_detection_json("total nonsense with no json") == []
++    assert parse_detection_json("") == []
++
++
++def test_parse_detection_json_strict_raises_user_safe_error():
++    with pytest.raises(VisionError):
++        parse_detection_json("the model rambled and returned no json", strict=True)
++    with pytest.raises(VisionError):
++        parse_detection_json('{"items": "not-a-list"}', strict=True)
++
++
++def test_ollama_provider_unreachable_raises_vision_error(monkeypatch):
++    import requests as requests_module
++
++    def boom(*args, **kwargs):
++        raise requests_module.exceptions.ConnectionError("refused")
++
++    monkeypatch.setattr(vision.requests, "post", boom)
++    provider = vision.OllamaVisionProvider()
++    image = ROOT / "test-data" / "fake.jpg"
++    image.parent.mkdir(parents=True, exist_ok=True)
++    image.write_bytes(b"fake")
++    with pytest.raises(VisionError) as exc_info:
++        provider.detect(image)
++    assert "Ollama" in str(exc_info.value)
++
++
++# ---------------------------------------------------------------------------
++# T4: inline container creation from capture
++# ---------------------------------------------------------------------------
++
++def test_capture_create_container_returns_ids_and_defaults_to_box():
++    reset_db()
++    client = TestClient(app)
++    response = client.post("/api/capture/containers", data={"name": "", "room_name": "attic"})
++    assert response.status_code == 200
++    body = response.json()
++    assert body["container_id"] == body["box_id"]
++    assert body["public_id"]
++    assert body["container_type"] == "box"
++    assert body["capture_url"] == f"/capture/{body['public_id']}"
++
++    conn = db_conn()
++    box = get_box(conn, box_id=body["container_id"])
++    assert box["container_type"] == "box"
++    assert box["room_name"] == "attic"
++    assert box["labels"], "QR label should be generated for the new container"
++    conn.close()
++
++
++def test_capture_page_loads_for_new_container():
++    reset_db()
++    client = TestClient(app)
++    created = client.post("/api/capture/containers", data={"name": "Attic-Box-777", "room_name": "attic"}).json()
++    page = client.get(created["capture_url"])
++    assert page.status_code == 200
++    assert "Attic-Box-777" in page.text
++
++
++# ---------------------------------------------------------------------------
++# T6 + T7: end-to-end capture -> detect -> confirm/dismiss -> persist
++# ---------------------------------------------------------------------------
++
++def test_end_to_end_mobile_capture_confirm_and_dismiss():
++    reset_db()
++    client = TestClient(app)
++
++    created = client.post("/api/capture/containers", data={"name": "", "room_name": "garage"}).json()
++    box_id = created["container_id"]
++
++    upload = client.post(
++        f"/api/boxes/{box_id}/photos",
++        files={"photos": ("hammer_extension_cord.jpg", b"fake image bytes", "image/jpeg")},
++    )
++    assert upload.status_code == 200
++    body = upload.json()
++    assert body["vision_error"] is None
++    suggestions = body["suggestions"]
++    assert len(suggestions) >= 2
++    for suggestion in suggestions:
++        assert set(suggestion) >= {"id", "name", "quantity", "confidence", "category", "notes"}
++
++    keep, drop = suggestions[0], suggestions[1]
++    result = client.post(
++        "/api/detections/confirm-batch",
++        json={"confirm": [{"id": keep["id"], "quantity": 3}], "dismiss": [drop["id"]]},
++    ).json()
++    assert len(result["confirmed"]) == 1
++    assert result["dismissed_count"] == 1
++
++    conn = db_conn()
++    box = get_box(conn, box_id=box_id)
++    names = {item["item_name"]: item for item in box["items"]}
++    assert keep["name"] in names
++    assert names[keep["name"]]["status"] == "confirmed"
++    assert names[keep["name"]]["quantity"] == 3
++    assert drop["name"] not in names, "dismissed suggestions must never enter box_items"
++
++    statuses = {
++        row["id"]: row["status"]
++        for row in conn.execute("SELECT id, status FROM detection_suggestions WHERE box_id = ?", (box_id,))
++    }
++    assert statuses[keep["id"]] == "confirmed"
++    assert statuses[drop["id"]] == "dismissed"
++
++    history_actions = [
++        row["action"]
++        for row in conn.execute("SELECT action FROM edit_history WHERE entity_type = 'detection' ORDER BY id")
++    ]
++    assert "confirmed" in history_actions
++    assert "dismissed" in history_actions
++    conn.close()
++
++
++def test_confirm_is_idempotent_and_dismissed_cannot_be_confirmed():
++    reset_db()
++    client = TestClient(app)
++    created = client.post("/api/capture/containers", data={"room_name": "office"}).json()
++    box_id = created["container_id"]
++    suggestions = client.post(
++        f"/api/boxes/{box_id}/photos",
++        files={"photos": ("charger_cable.jpg", b"fake", "image/jpeg")},
++    ).json()["suggestions"]
++
++    conn = db_conn()
++    first = confirm_detection(conn, suggestions[0]["id"], status="confirmed")
++    second = confirm_detection(conn, suggestions[0]["id"], status="confirmed")
++    assert first is not None and second is None, "double confirm must not duplicate items"
++
++    assert dismiss_detection(conn, suggestions[1]["id"]) is True
++    assert confirm_detection(conn, suggestions[1]["id"]) is None, "dismissed suggestion cannot be confirmed"
++    conn.commit()
++
++    box = get_box(conn, box_id=box_id)
++    assert len(box["items"]) == 1
++    conn.close()
++
++    # HTTP guards mirror the repository behavior.
++    assert client.post(f"/api/detections/{suggestions[0]['id']}/confirm").status_code == 404
++    assert client.delete(f"/api/detections/{suggestions[1]['id']}").status_code == 404
++
++
++def test_photos_endpoint_reports_vision_error_but_saves_photo(monkeypatch):
++    reset_db()
++
++    class ExplodingProvider(vision.VisionProvider):
++        def detect(self, image_path, original_name=None):
++            raise VisionError("Could not reach the local Ollama service.")
++
++    monkeypatch.setattr("app.main.get_provider", lambda: ExplodingProvider())
++    client = TestClient(app)
++    created = client.post("/api/capture/containers", data={"room_name": "attic"}).json()
++    box_id = created["container_id"]
++
++    response = client.post(
++        f"/api/boxes/{box_id}/photos",
++        files={"photos": ("tent.jpg", b"fake", "image/jpeg")},
++    )
++    assert response.status_code == 200
++    body = response.json()
++    assert body["suggestions"] == []
++    assert "Ollama" in body["vision_error"]
++
++    conn = db_conn()
++    box = get_box(conn, box_id=box_id)
++    assert len(box["photos"]) == 1, "photo must still be saved when vision fails"
++    conn.close()
+-- 
+2.43.0
+
