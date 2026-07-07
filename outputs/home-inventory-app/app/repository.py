@@ -264,21 +264,62 @@ def move_box_item(conn: sqlite3.Connection, item_id: int, target_box_id: int) ->
     record_history(conn, "box_item", item_id, "moved", before=before, after={"box_id": target_box_id})
 
 
-def confirm_detection(conn: sqlite3.Connection, suggestion_id: int) -> int:
+def confirm_detection(conn: sqlite3.Connection, suggestion_id: int, status: str = "likely", quantity: int | None = None) -> int | None:
+    """Promote a suggested detection into ``box_items``.
+
+    Returns the new item id, or ``None`` when the suggestion does not exist
+    or is no longer in 'suggested' state (already confirmed/dismissed), so
+    double-taps never create duplicate inventory rows.
+    """
     suggestion = row(conn.execute("SELECT * FROM detection_suggestions WHERE id = ?", (suggestion_id,)))
+    if not suggestion or suggestion["status"] != "suggested":
+        return None
+    final_quantity = max(1, int(quantity)) if quantity is not None else suggestion["quantity"]
     item_id = add_item_to_box(
         conn,
         suggestion["box_id"],
         suggestion["item_name"],
-        quantity=suggestion["quantity"],
-        status="likely",
+        quantity=final_quantity,
+        status=status,
         confidence=suggestion["confidence"],
         category=suggestion["category"] or "",
         notes=suggestion["notes"] or "",
     )
     conn.execute("UPDATE detection_suggestions SET status = 'confirmed' WHERE id = ?", (suggestion_id,))
-    record_history(conn, "detection", suggestion_id, "confirmed", after={"box_item_id": item_id})
+    record_history(conn, "detection", suggestion_id, "confirmed", after={"box_item_id": item_id, "quantity": final_quantity})
     return item_id
+
+
+def dismiss_detection(conn: sqlite3.Connection, suggestion_id: int) -> bool:
+    """Mark a suggestion dismissed (auditable; never enters box_items).
+
+    Returns False when the suggestion does not exist or was already resolved.
+    """
+    suggestion = row(conn.execute("SELECT * FROM detection_suggestions WHERE id = ?", (suggestion_id,)))
+    if not suggestion or suggestion["status"] != "suggested":
+        return False
+    conn.execute("UPDATE detection_suggestions SET status = 'dismissed' WHERE id = ?", (suggestion_id,))
+    record_history(conn, "detection", suggestion_id, "dismissed", before={"item_name": suggestion["item_name"]})
+    return True
+
+
+def resolve_merged_detections(conn: sqlite3.Connection, duplicate_ids: list[int], item_id: int, primary_id: int) -> int:
+    """Mark duplicate suggestions as confirmed-by-merge (no extra box_items).
+
+    Used when several photos of the same container detect the same item and
+    the user confirms them as one row.  Keeps the audit trail accurate:
+    each duplicate is recorded as merged into the primary suggestion's item.
+    Returns how many duplicates were resolved.
+    """
+    resolved = 0
+    for duplicate_id in duplicate_ids:
+        suggestion = row(conn.execute("SELECT * FROM detection_suggestions WHERE id = ?", (duplicate_id,)))
+        if not suggestion or suggestion["status"] != "suggested" or duplicate_id == primary_id:
+            continue
+        conn.execute("UPDATE detection_suggestions SET status = 'confirmed' WHERE id = ?", (duplicate_id,))
+        record_history(conn, "detection", duplicate_id, "merged", after={"box_item_id": item_id, "merged_into_suggestion": primary_id})
+        resolved += 1
+    return resolved
 
 
 def normalize(value: str) -> str:

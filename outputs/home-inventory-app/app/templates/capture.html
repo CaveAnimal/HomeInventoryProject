@@ -17,7 +17,16 @@
 
     {% if not container %}
     <section class="capture-card">
-      <h1>Which container?</h1>
+      <h1>Start a new box</h1>
+      <p class="capture-hint">Creates a new container (type: box) so you can photograph it right away.</p>
+      <input id="newName" type="text" placeholder="Name (optional — auto-generated)" autocomplete="off">
+      <input id="newRoom" type="text" placeholder="Room (optional)" autocomplete="off">
+      <button id="createBtn" class="capture-btn" type="button">Create &amp; Start Capturing</button>
+      <div id="createError" class="capture-status error" hidden>Could not create the container. Try again.</div>
+    </section>
+
+    <section class="capture-card">
+      <h1>…or pick an existing container</h1>
       <input id="containerSearch" type="search" placeholder="Search containers…" autocomplete="off">
       <div id="containerList" class="container-pick-list">
         {% for c in containers %}
@@ -43,13 +52,22 @@
         <span class="capture-btn" id="captureBtn">Take Photo</span>
       </label>
 
-      <div id="uploading" class="capture-status" hidden>Uploading…</div>
+      <label class="capture-btn-wrap">
+        <input id="libraryInput" type="file" accept="image/*" multiple hidden>
+        <span class="capture-secondary">Choose From Library</span>
+      </label>
+      <p class="capture-hint">Photos taken with smart glasses (Ray-Ban Meta etc.) sync to your camera roll — pick them here.</p>
+
+      <div id="uploading" class="capture-status" hidden>Uploading &amp; detecting…</div>
       <div id="uploadError" class="capture-status error" hidden>Upload failed. Try again.</div>
+      <div id="visionError" class="capture-status error" hidden></div>
 
       <div id="detectedWrap" hidden>
         <h2>Detected items</h2>
+        <p class="capture-hint">Uncheck anything wrong, fix counts, then confirm. Only confirmed items enter your inventory.</p>
         <div id="detectedList" class="detected-list"></div>
-        <p class="capture-hint">Review these on the <a href="/boxes/{{ container.id }}">container page</a>.</p>
+        <button id="confirmBtn" class="capture-btn" type="button">Confirm Selected Items</button>
+        <div id="confirmStatus" class="capture-status" hidden></div>
       </div>
 
       <div id="photoStrip" class="photo-strip"></div>
@@ -63,26 +81,62 @@
     <script>
       const boxId = {{ container.id }};
       const photoInput = document.getElementById("photoInput");
+      const libraryInput = document.getElementById("libraryInput");
       const captureLabel = document.getElementById("captureLabel");
-      const captureBtn = document.getElementById("captureBtn");
       const uploading = document.getElementById("uploading");
       const uploadError = document.getElementById("uploadError");
+      const visionError = document.getElementById("visionError");
       const detectedWrap = document.getElementById("detectedWrap");
       const detectedList = document.getElementById("detectedList");
+      const confirmBtn = document.getElementById("confirmBtn");
+      const confirmStatus = document.getElementById("confirmStatus");
       const photoStrip = document.getElementById("photoStrip");
       const anotherBtn = document.getElementById("anotherBtn");
 
-      photoInput.addEventListener("change", async () => {
-        if (!photoInput.files.length) return;
+      // pending[id] = { row, checkbox, qtyInput }
+      const pending = {};
+
+      function addDetectionRow(s) {
+        const row = document.createElement("div");
+        row.className = "detected-row";
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = true;
+
+        const label = document.createElement("span");
+        label.className = "detected-name";
+        label.textContent = s.name;
+
+        const qty = document.createElement("input");
+        qty.type = "number";
+        qty.min = "1";
+        qty.inputMode = "numeric";
+        qty.value = s.quantity || 1;
+        qty.className = "detected-qty";
+
+        const meta = document.createElement("small");
+        meta.className = "detected-meta";
+        const pct = Math.round((s.confidence || 0) * 100);
+        meta.textContent = s.category ? `${pct}% · ${s.category}` : `${pct}%`;
+
+        row.append(checkbox, label, qty, meta);
+        detectedList.appendChild(row);
+        pending[s.id] = { row, checkbox, qtyInput: qty };
+      }
+
+      async function uploadFiles(input) {
+        if (!input.files.length) return;
         captureLabel.hidden = true;
         uploading.hidden = false;
         uploadError.hidden = true;
+        visionError.hidden = true;
 
         const data = new FormData();
-        for (const file of photoInput.files) data.append("photos", file);
+        for (const file of input.files) data.append("photos", file);
 
         const preview = document.createElement("img");
-        preview.src = URL.createObjectURL(photoInput.files[0]);
+        preview.src = URL.createObjectURL(input.files[0]);
         preview.className = "photo-strip-thumb";
         photoStrip.appendChild(preview);
 
@@ -91,14 +145,14 @@
           uploading.hidden = true;
           if (!res.ok) throw new Error();
           const json = await res.json();
+          if (json.vision_error) {
+            visionError.textContent = json.vision_error;
+            visionError.hidden = false;
+          }
           if (json.suggestions && json.suggestions.length) {
             detectedWrap.hidden = false;
-            for (const s of json.suggestions) {
-              const row = document.createElement("div");
-              row.className = "detected-row";
-              row.textContent = `${s.name} (${Math.round(s.confidence * 100)}%)`;
-              detectedList.appendChild(row);
-            }
+            confirmStatus.hidden = true;
+            for (const s of json.suggestions) addDetectionRow(s);
           }
           anotherBtn.hidden = false;
         } catch {
@@ -106,7 +160,44 @@
           uploadError.hidden = false;
           captureLabel.hidden = false;
         }
-        photoInput.value = "";
+        input.value = "";
+      }
+
+      photoInput.addEventListener("change", () => uploadFiles(photoInput));
+      libraryInput.addEventListener("change", () => uploadFiles(libraryInput));
+
+      confirmBtn.addEventListener("click", async () => {
+        const confirm = [];
+        const dismiss = [];
+        for (const [id, entry] of Object.entries(pending)) {
+          if (entry.checkbox.checked) {
+            confirm.push({ id: Number(id), quantity: Math.max(1, Number(entry.qtyInput.value) || 1) });
+          } else {
+            dismiss.push(Number(id));
+          }
+        }
+        if (!confirm.length && !dismiss.length) return;
+        confirmBtn.disabled = true;
+        try {
+          const res = await fetch("/api/detections/confirm-batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm, dismiss }),
+          });
+          if (!res.ok) throw new Error();
+          const json = await res.json();
+          for (const key of Object.keys(pending)) {
+            pending[key].row.remove();
+            delete pending[key];
+          }
+          confirmStatus.textContent = `Saved ${json.confirmed.length} item(s) to inventory` +
+            (json.dismissed_count ? `, dismissed ${json.dismissed_count}.` : ".");
+          confirmStatus.hidden = false;
+        } catch {
+          confirmStatus.textContent = "Could not save. Check your connection and try again.";
+          confirmStatus.hidden = false;
+        }
+        confirmBtn.disabled = false;
       });
 
       anotherBtn.addEventListener("click", () => {
@@ -126,6 +217,25 @@
         rows.forEach(row => {
           row.hidden = q && !row.textContent.toLowerCase().includes(q);
         });
+      });
+
+      const createBtn = document.getElementById("createBtn");
+      const createError = document.getElementById("createError");
+      createBtn.addEventListener("click", async () => {
+        createBtn.disabled = true;
+        createError.hidden = true;
+        const data = new FormData();
+        data.append("name", document.getElementById("newName").value.trim());
+        data.append("room_name", document.getElementById("newRoom").value.trim() || "unassigned");
+        try {
+          const res = await fetch("/api/capture/containers", { method: "POST", body: data });
+          if (!res.ok) throw new Error();
+          const json = await res.json();
+          window.location.href = json.capture_url;
+        } catch {
+          createError.hidden = false;
+          createBtn.disabled = false;
+        }
       });
     </script>
     {% endif %}
