@@ -119,3 +119,54 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+
+/* --- Strict detection review (llm_vision sprint) --- */
+.detected-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.25rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+.detected-row input[type="checkbox"] {
+  width: 1.35rem;
+  height: 1.35rem;
+  flex: none;
+}
+.detected-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.detected-qty {
+  width: 3.6rem;
+  flex: none;
+  padding: 0.35rem;
+  text-align: center;
+  font-size: 1rem;
+}
+.detected-meta {
+  flex: none;
+  color: #667;
+  max-width: 9rem;
+  text-align: right;
+}
+#confirmBtn {
+  margin-top: 0.9rem;
+  width: 100%;
+}
+
+/* --- Glasses import inbox --- */
+.inbox-thumb {
+  width: 3rem;
+  height: 3rem;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: none;
+}
+#containerSelect, #newContainerFields input {
+  width: 100%;
+  padding: 0.55rem;
+  margin: 0.3rem 0;
+  font-size: 1rem;
+}

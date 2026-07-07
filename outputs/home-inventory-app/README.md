@@ -71,6 +71,37 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 - `VISION_PROVIDER=openai` is available only if you choose to configure `OPENAI_API_KEY`. It sends images to OpenAI, so leave it off if you want photos to remain entirely local.
 
+## Mobile Capture Flow (llm_vision)
+
+The `/capture` page is the iPhone-first entry point:
+
+1. Open `http://YOUR-COMPUTER-IP:8000/capture` on the phone.
+2. Tap **Create & Start Capturing** to make a new container inline (default type `box`, QR label generated automatically), or pick an existing one.
+3. Take a photo. The strict detection list appears on the same page with item name, editable count, confidence, and category.
+4. Uncheck wrong items, fix counts, then tap **Confirm Selected Items**. Confirmed items are saved to inventory with status `confirmed`; unchecked ones are recorded as `dismissed` and never enter inventory. Both are tracked in edit history.
+
+If the Ollama vision service is unreachable or returns malformed output, the photo is still saved and the page shows an actionable error message.
+
+### Key API endpoints
+- `POST /api/capture/containers` — inline container creation; returns `container_id`, `public_id`, `capture_url`.
+- `POST /api/boxes/{id}/photos` — returns `{"suggestions": [...], "vision_error": null|"message"}`; each suggestion has `id`, `name`, `quantity`, `confidence`, `category`, `notes`.
+- `POST /api/detections/confirm-batch` — body `{"confirm": [{"id": 1, "quantity": 2}], "dismiss": [3]}`.
+
+## Smart Glasses (Ray-Ban Meta) Workflow — Optional
+
+There is no way for a local web app to connect directly to Ray-Ban Meta glasses: the glasses pair with your phone, and photos sync through the Meta AI app. Direct camera access for third-party software requires Meta's Wearables Device Access Toolkit, a native iOS/Android SDK currently in developer preview. This app therefore supports glasses through two import paths that work today, plus a documented hook for a future direct integration.
+
+**Path 1 — Photo Library (iPhone, easiest).** Take photos with the glasses; they sync to your camera roll via the Meta AI app. On the capture page, tap **Choose From Library**, multi-select the glasses shots, and they flow through the normal detect → review → confirm pipeline.
+
+**Path 2 — Import inbox (desktop, batch).** Copy or sync glasses photos into the inbox folder (`data/import-inbox` by default, or set `HOME_INVENTORY_IMPORT`). Open `/import`, select photos, choose an existing container or create a new box inline, and click **Import & Generate Item List**. Detections from all photos are merged into a single deduplicated list — same item seen in multiple photos becomes one entry with summed quantity — which you review and confirm in one pass. Imported files are moved out of the inbox into permanent photo storage.
+
+**Path 3 — Direct integration (future).** A companion mobile app built with Meta's Wearables Device Access Toolkit could capture from the glasses and POST directly to this app's API: `POST /api/capture/containers` to create a box, `POST /api/boxes/{id}/photos` to upload and detect, and `POST /api/detections/confirm-batch` to persist. The endpoints already accept exactly what such an app would send.
+
+### Import API
+- `GET /api/import/photos` — list inbox files.
+- `POST /api/import` — body `{"filenames": [...], "box_id": 1}` or `{"filenames": [...], "new_container": {"name": "", "room_name": "attic"}}`, optional `"merge": true` (default). Returns merged suggestions where each entry may carry `merge_ids` (duplicate detections resolved together on confirm).
+- `POST /api/detections/confirm-batch` — confirm entries may include `merge_ids`; duplicates are marked confirmed-by-merge without creating extra inventory rows.
+
 ## Core Flows
 
 - **Create box from photos:** `Create` page, choose single or batch of four, upload photos, fill location, save.

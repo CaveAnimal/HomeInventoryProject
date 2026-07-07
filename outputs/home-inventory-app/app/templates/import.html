@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Import Photos — Home Inventory</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/capture.css">
+</head>
+<body>
+  <header class="capture-bar">
+    <a href="/">Home Inventory</a>
+    <span>Import photos</span>
+  </header>
+
+  <main class="capture-page">
+    <section class="capture-card">
+      <h1>Import from inbox</h1>
+      <p class="capture-hint">
+        Photos from smart glasses (e.g. Ray-Ban Meta) or any camera: sync or copy them into
+        <code>{{ inbox_dir }}</code>, then import them here. Detections from all selected photos
+        are merged into one item list for review.
+      </p>
+
+      {% if not photos %}
+      <p class="capture-status">Inbox is empty. Copy image files (.jpg, .png, .webp) into the folder above and refresh.</p>
+      {% else %}
+      <div id="inboxList" class="detected-list">
+        {% for p in photos %}
+        <div class="detected-row inbox-row">
+          <input type="checkbox" checked data-filename="{{ p.filename }}">
+          <img class="inbox-thumb" src="/media/inbox/{{ p.filename }}" alt="">
+          <span class="detected-name">{{ p.filename }}</span>
+          <small class="detected-meta">{{ p.size_kb }} KB</small>
+        </div>
+        {% endfor %}
+      </div>
+
+      <h2>Destination</h2>
+      <select id="containerSelect">
+        <option value="">— Create a new box —</option>
+        {% for c in containers %}
+        <option value="{{ c.id }}">{{ c.name }} ({{ c.room_name }})</option>
+        {% endfor %}
+      </select>
+      <div id="newContainerFields">
+        <input id="newName" type="text" placeholder="New box name (optional — auto-generated)" autocomplete="off">
+        <input id="newRoom" type="text" placeholder="Room (optional)" autocomplete="off">
+      </div>
+
+      <button id="importBtn" class="capture-btn" type="button">Import &amp; Generate Item List</button>
+      <div id="importing" class="capture-status" hidden>Importing &amp; detecting…</div>
+      <div id="importError" class="capture-status error" hidden></div>
+      {% endif %}
+    </section>
+
+    <section class="capture-card" id="resultCard" hidden>
+      <h1 id="resultTitle">Detected items</h1>
+      <p class="capture-hint">Merged across all imported photos. Uncheck wrong items, fix counts, then confirm.</p>
+      <div id="detectedList" class="detected-list"></div>
+      <button id="confirmBtn" class="capture-btn" type="button">Confirm Selected Items</button>
+      <div id="confirmStatus" class="capture-status" hidden></div>
+      <div class="capture-actions">
+        <a id="containerLink" class="capture-secondary-link" href="#">Open container page</a>
+      </div>
+    </section>
+
+    <script>
+      const containerSelect = document.getElementById("containerSelect");
+      const newContainerFields = document.getElementById("newContainerFields");
+      const importBtn = document.getElementById("importBtn");
+      const importing = document.getElementById("importing");
+      const importError = document.getElementById("importError");
+      const resultCard = document.getElementById("resultCard");
+      const resultTitle = document.getElementById("resultTitle");
+      const detectedList = document.getElementById("detectedList");
+      const confirmBtn = document.getElementById("confirmBtn");
+      const confirmStatus = document.getElementById("confirmStatus");
+      const containerLink = document.getElementById("containerLink");
+
+      const pending = {};
+
+      if (containerSelect) {
+        containerSelect.addEventListener("change", () => {
+          newContainerFields.hidden = Boolean(containerSelect.value);
+        });
+      }
+
+      function addDetectionRow(s) {
+        const row = document.createElement("div");
+        row.className = "detected-row";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = true;
+        const label = document.createElement("span");
+        label.className = "detected-name";
+        label.textContent = s.name;
+        const qty = document.createElement("input");
+        qty.type = "number";
+        qty.min = "1";
+        qty.inputMode = "numeric";
+        qty.value = s.quantity || 1;
+        qty.className = "detected-qty";
+        const meta = document.createElement("small");
+        meta.className = "detected-meta";
+        const pct = Math.round((s.confidence || 0) * 100);
+        meta.textContent = s.category ? `${pct}% · ${s.category}` : `${pct}%`;
+        row.append(checkbox, label, qty, meta);
+        detectedList.appendChild(row);
+        pending[s.id] = { row, checkbox, qtyInput: qty, mergeIds: s.merge_ids || [] };
+      }
+
+      if (importBtn) importBtn.addEventListener("click", async () => {
+        const filenames = [...document.querySelectorAll('#inboxList input[type="checkbox"]:checked')]
+          .map(cb => cb.dataset.filename);
+        if (!filenames.length) return;
+        importBtn.disabled = true;
+        importing.hidden = false;
+        importError.hidden = true;
+        const body = { filenames, merge: true };
+        if (containerSelect.value) {
+          body.box_id = Number(containerSelect.value);
+        } else {
+          body.new_container = {
+            name: document.getElementById("newName").value.trim(),
+            room_name: document.getElementById("newRoom").value.trim(),
+          };
+        }
+        try {
+          const res = await fetch("/api/import", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          importing.hidden = true;
+          if (!res.ok) throw new Error();
+          const json = await res.json();
+          document.querySelectorAll('#inboxList input[type="checkbox"]:checked')
+            .forEach(cb => cb.closest(".detected-row").remove());
+          resultCard.hidden = false;
+          resultTitle.textContent = `Detected items — ${json.container_name}`;
+          containerLink.href = `/boxes/${json.container_id}`;
+          if (json.vision_error) {
+            importError.textContent = json.vision_error;
+            importError.hidden = false;
+          }
+          for (const s of json.suggestions) addDetectionRow(s);
+          resultCard.scrollIntoView({ behavior: "smooth" });
+        } catch {
+          importing.hidden = true;
+          importError.textContent = "Import failed. Check the files and try again.";
+          importError.hidden = false;
+        }
+        importBtn.disabled = false;
+      });
+
+      confirmBtn.addEventListener("click", async () => {
+        const confirm = [];
+        const dismiss = [];
+        for (const [id, entry] of Object.entries(pending)) {
+          if (entry.checkbox.checked) {
+            confirm.push({
+              id: Number(id),
+              quantity: Math.max(1, Number(entry.qtyInput.value) || 1),
+              merge_ids: entry.mergeIds,
+            });
+          } else {
+            dismiss.push(Number(id), ...entry.mergeIds);
+          }
+        }
+        if (!confirm.length && !dismiss.length) return;
+        confirmBtn.disabled = true;
+        try {
+          const res = await fetch("/api/detections/confirm-batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm, dismiss }),
+          });
+          if (!res.ok) throw new Error();
+          const json = await res.json();
+          for (const key of Object.keys(pending)) {
+            pending[key].row.remove();
+            delete pending[key];
+          }
+          confirmStatus.textContent = `Saved ${json.confirmed.length} item(s) to inventory` +
+            (json.dismissed_count ? `, dismissed ${json.dismissed_count}.` : ".");
+          confirmStatus.hidden = false;
+        } catch {
+          confirmStatus.textContent = "Could not save. Try again.";
+          confirmStatus.hidden = false;
+        }
+        confirmBtn.disabled = false;
+      });
+    </script>
+  </main>
+</body>
+</html>

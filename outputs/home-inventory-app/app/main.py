@@ -21,10 +21,13 @@ from .repository import (
     confirm_detection,
     create_box,
     delete_box_item,
+    dismiss_detection,
     get_box,
     list_boxes,
     move_box_item,
+    normalize,
     record_history,
+    resolve_merged_detections,
     rows,
     update_box,
     update_box_item,
@@ -32,8 +35,8 @@ from .repository import (
 )
 from .services.labels import generate_qr
 from .services.search import search_items, similar_items
-from .services.vision import get_provider
-from .settings import APP_NAME, DATA_DIR, LABEL_DIR, PHOTO_DIR, ensure_dirs
+from .services.vision import VisionError, get_provider
+from .settings import APP_NAME, DATA_DIR, IMPORT_DIR, IMPORT_EXTENSIONS, LABEL_DIR, PHOTO_DIR, ensure_dirs
 
 migrate()
 ensure_dirs()
@@ -43,6 +46,7 @@ templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 app.mount("/media/photos", StaticFiles(directory=PHOTO_DIR), name="photos")
 app.mount("/media/labels", StaticFiles(directory=LABEL_DIR), name="labels")
+app.mount("/media/inbox", StaticFiles(directory=IMPORT_DIR), name="inbox")
 
 
 def db():
@@ -160,17 +164,178 @@ async def api_create_box(
     return {"box_id": box_id, "container_id": box_id, "public_id": box["public_id"], "url": f"/boxes/{box_id}", "label_url": f"/media/labels/{filename}"}
 
 
+@app.post("/api/capture/containers")
+async def api_capture_create_container(
+    request: Request,
+    name: Annotated[str, Form()] = "",
+    room_name: Annotated[str, Form()] = "unassigned",
+    conn=Depends(db),
+):
+    """Create a new container inline from the mobile capture flow (T4/D-004).
+
+    Always creates ``container_type='box'`` in this phase and returns the ids
+    the mobile UI needs to continue capturing without leaving the page.
+    """
+    box_id = create_box(conn, name.strip() or None, room_name.strip() or "unassigned", 0, 0, 0, container_type="box")
+    box = get_box(conn, box_id=box_id)
+    target_url = str(request.url_for("public_box_page", public_id=box["public_id"]))
+    filename = generate_qr(box["public_id"], box["name"], target_url)
+    conn.execute("INSERT INTO labels(box_id, filename, target_url) VALUES (?, ?, ?)", (box_id, filename, target_url))
+    record_history(conn, "label", box_id, "generated", after={"filename": filename, "target_url": target_url})
+    return {
+        "container_id": box_id,
+        "box_id": box_id,
+        "public_id": box["public_id"],
+        "name": box["name"],
+        "container_type": box["container_type"],
+        "capture_url": f"/capture/{box['public_id']}",
+    }
+
+
+@app.get("/import", response_class=HTMLResponse)
+def import_page(request: Request, conn=Depends(db)):
+    """Batch import photos synced from smart glasses (e.g. Ray-Ban Meta)."""
+    return templates.TemplateResponse(
+        "import.html",
+        {"request": request, "photos": list_inbox_photos(), "containers": list_boxes(conn), "inbox_dir": str(IMPORT_DIR)},
+    )
+
+
+def list_inbox_photos() -> list[dict]:
+    photos = []
+    for path in sorted(IMPORT_DIR.iterdir()):
+        if path.is_file() and path.suffix.lower() in IMPORT_EXTENSIONS:
+            photos.append({"filename": path.name, "size_kb": round(path.stat().st_size / 1024, 1)})
+    return photos
+
+
+@app.get("/api/import/photos")
+def api_import_photos():
+    return {"photos": list_inbox_photos(), "inbox_dir": str(IMPORT_DIR)}
+
+
+@app.post("/api/import")
+async def api_import(request: Request, conn=Depends(db)):
+    """Attach inbox photos to a container and generate an item list.
+
+    Body: {"filenames": [...], "box_id": 1}  or
+          {"filenames": [...], "new_container": {"name": "", "room_name": "attic"}}
+    Optional: "merge": true (default) — deduplicate detections across photos
+    into one list entry per item with summed quantities.
+    Photos are moved out of the inbox into permanent photo storage.
+    """
+    data = await request.json()
+    filenames = data.get("filenames") or []
+    if not filenames:
+        raise HTTPException(400, "No filenames provided")
+
+    if data.get("box_id"):
+        box = get_box(conn, box_id=int(data["box_id"]))
+        if not box:
+            raise HTTPException(404, "Container not found")
+        box_id = box["id"]
+    else:
+        new_container = data.get("new_container") or {}
+        box_id = create_box(
+            conn,
+            (new_container.get("name") or "").strip() or None,
+            (new_container.get("room_name") or "").strip() or "unassigned",
+            0, 0, 0,
+            container_type="box",
+        )
+        box = get_box(conn, box_id=box_id)
+        target_url = str(request.url_for("public_box_page", public_id=box["public_id"]))
+        filename = generate_qr(box["public_id"], box["name"], target_url)
+        conn.execute("INSERT INTO labels(box_id, filename, target_url) VALUES (?, ?, ?)", (box_id, filename, target_url))
+        record_history(conn, "label", box_id, "generated", after={"filename": filename, "target_url": target_url})
+
+    provider = get_provider()
+    suggestions: list[dict] = []
+    vision_error: str | None = None
+    imported: list[str] = []
+    for name in filenames:
+        # Reject anything that isn't a plain file directly inside the inbox.
+        safe_name = Path(name).name
+        source = IMPORT_DIR / safe_name
+        if safe_name != name or not source.is_file() or source.suffix.lower() not in IMPORT_EXTENSIONS:
+            raise HTTPException(400, f"Invalid inbox file: {name}")
+        stored_name = f"{uuid.uuid4().hex}{source.suffix.lower()}"
+        destination = PHOTO_DIR / stored_name
+        shutil.move(str(source), str(destination))
+        photo_id = add_photo(conn, box_id, stored_name, safe_name, "")
+        imported.append(safe_name)
+        try:
+            detected = provider.detect(destination, original_name=safe_name)
+        except VisionError as exc:
+            vision_error = str(exc)
+            continue
+        for item in detected:
+            suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
+            suggestions.append(
+                {
+                    "id": suggestion_id,
+                    "name": item.name,
+                    "quantity": item.quantity,
+                    "confidence": item.confidence,
+                    "category": item.category,
+                    "notes": item.notes,
+                }
+            )
+
+    merge = data.get("merge", True)
+    payload = merge_suggestions(suggestions) if merge else suggestions
+    return {
+        "container_id": box_id,
+        "public_id": box["public_id"],
+        "container_name": box["name"],
+        "imported": imported,
+        "merged": bool(merge),
+        "suggestions": payload,
+        "vision_error": vision_error,
+    }
+
+
+def merge_suggestions(suggestions: list[dict]) -> list[dict]:
+    """Deduplicate detections across photos into one entry per item.
+
+    Groups by normalized name; sums quantities; keeps the highest confidence
+    and its category.  ``id`` is the primary suggestion; ``merge_ids`` are the
+    duplicates to resolve alongside it on confirm.
+    """
+    grouped: dict[str, dict] = {}
+    for suggestion in suggestions:
+        key = normalize(suggestion["name"])
+        entry = grouped.get(key)
+        if entry is None:
+            grouped[key] = {**suggestion, "merge_ids": []}
+            continue
+        entry["quantity"] += suggestion["quantity"]
+        entry["merge_ids"].append(suggestion["id"])
+        if suggestion["confidence"] > entry["confidence"]:
+            entry["confidence"] = suggestion["confidence"]
+            entry["category"] = suggestion["category"]
+            entry["name"] = suggestion["name"]
+    return list(grouped.values())
+
+
 @app.post("/api/boxes/{box_id}/photos")
 async def api_add_photos(box_id: int, photos: Annotated[list[UploadFile], File()], conn=Depends(db)):
     if not get_box(conn, box_id=box_id):
         raise HTTPException(404, "Container not found")
-    suggestions = await save_photos_and_detect(conn, box_id, photos)
-    return {"suggestions": suggestions}
+    suggestions, vision_error = await save_photos_and_detect(conn, box_id, photos)
+    return {"suggestions": suggestions, "vision_error": vision_error}
 
 
-async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) -> list[dict]:
+async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) -> tuple[list[dict], str | None]:
+    """Store uploads and record strict detections.
+
+    Photos are always persisted.  If the vision provider fails (T3), the
+    user-safe error message is returned instead of raising, so the API
+    response stays actionable and no data is corrupted.
+    """
     provider = get_provider()
-    suggestions = []
+    suggestions: list[dict] = []
+    vision_error: str | None = None
     for upload in photos:
         if not upload.filename:
             continue
@@ -180,10 +345,24 @@ async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) ->
         with destination.open("wb") as handle:
             shutil.copyfileobj(upload.file, handle)
         photo_id = add_photo(conn, box_id, stored_name, upload.filename, upload.content_type or "")
-        for item in provider.detect(destination):
+        try:
+            detected = provider.detect(destination, original_name=upload.filename)
+        except VisionError as exc:
+            vision_error = str(exc)
+            continue
+        for item in detected:
             suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
-            suggestions.append({"id": suggestion_id, "name": item.name, "confidence": item.confidence})
-    return suggestions
+            suggestions.append(
+                {
+                    "id": suggestion_id,
+                    "name": item.name,
+                    "quantity": item.quantity,
+                    "confidence": item.confidence,
+                    "category": item.category,
+                    "notes": item.notes,
+                }
+            )
+    return suggestions, vision_error
 
 
 @app.delete("/api/boxes/{box_id}")
@@ -248,14 +427,47 @@ async def api_move_item(item_id: int, request: Request, conn=Depends(db)):
 
 @app.post("/api/detections/{suggestion_id}/confirm")
 def api_confirm_detection(suggestion_id: int, conn=Depends(db)):
-    return {"item_id": confirm_detection(conn, suggestion_id)}
+    item_id = confirm_detection(conn, suggestion_id)
+    if item_id is None:
+        raise HTTPException(404, "Suggestion not found or already resolved")
+    return {"item_id": item_id}
 
 
 @app.delete("/api/detections/{suggestion_id}")
 def api_dismiss_detection(suggestion_id: int, conn=Depends(db)):
-    conn.execute("UPDATE detection_suggestions SET status = 'dismissed' WHERE id = ?", (suggestion_id,))
-    record_history(conn, "detection", suggestion_id, "dismissed")
+    if not dismiss_detection(conn, suggestion_id):
+        raise HTTPException(404, "Suggestion not found or already resolved")
     return {"ok": True}
+
+
+@app.post("/api/detections/confirm-batch")
+async def api_confirm_detections_batch(request: Request, conn=Depends(db)):
+    """Mobile capture confirm action (T6/T7/D-002).
+
+    Body: {"confirm": [{"id": 1, "quantity": 2}, ...], "dismiss": [3, 4]}
+    Confirm entries may also be plain ids.  A confirm entry may include
+    "merge_ids": duplicate suggestions (same item seen in other photos) that
+    are resolved as confirmed-by-merge without creating extra inventory rows.
+    User-confirmed items persist to ``box_items`` with status 'confirmed';
+    dismissed suggestions never enter inventory but stay auditable via
+    detection status + edit history.
+    """
+    data = await request.json()
+    confirmed_items: list[dict] = []
+    for entry in data.get("confirm", []) or []:
+        if isinstance(entry, dict):
+            suggestion_id = int(entry.get("id", 0))
+            quantity = entry.get("quantity")
+            quantity = int(quantity) if quantity is not None else None
+            merge_ids = [int(value) for value in (entry.get("merge_ids") or [])]
+        else:
+            suggestion_id, quantity, merge_ids = int(entry), None, []
+        item_id = confirm_detection(conn, suggestion_id, status="confirmed", quantity=quantity)
+        if item_id is not None:
+            merged = resolve_merged_detections(conn, merge_ids, item_id, suggestion_id) if merge_ids else 0
+            confirmed_items.append({"suggestion_id": suggestion_id, "item_id": item_id, "merged_duplicates": merged})
+    dismissed = sum(1 for suggestion_id in (data.get("dismiss", []) or []) if dismiss_detection(conn, int(suggestion_id)))
+    return {"confirmed": confirmed_items, "dismissed_count": dismissed}
 
 
 @app.post("/api/items/merge")
