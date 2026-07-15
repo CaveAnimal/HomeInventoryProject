@@ -1,0 +1,18 @@
+[
+  {
+    "photo": "data/photos/3e612d7c397940ebbe60aaa92df4a38c.jpg",
+    "description": "Small parts/tools laid out on a towel: files, picks, tape measures, rulers, pencils, screwdriver bit set, bagged electronics",
+    "expected": [
+      "tape measure",
+      "tape measure",
+      "ruler",
+      "ruler",
+      "file",
+      "pick",
+      "tweezers",
+      "pencil",
+      "screwdriver",
+      "electronics"
+    ]
+  }
+]

@@ -28,6 +28,7 @@ photos are still saved, only suggestions are skipped.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -35,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import requests
+from PIL import Image, ImageOps
 
 from ..categories import HOUSEHOLD_CATEGORIES
 
@@ -42,6 +44,92 @@ FALLBACK_CATEGORY = "Unknown / Needs Review"
 MAX_NAME_LENGTH = 120
 MAX_NOTES_LENGTH = 500
 _CANONICAL_CATEGORIES = {category.lower(): category for category in HOUSEHOLD_CATEGORIES}
+
+# iPhone photos routinely arrive at 12MP+ with an EXIF rotation flag. Ollama's
+# image decoder does not apply EXIF orientation, and an un-downscaled photo's
+# vision tokens can alone exceed the model's context window (observed:
+# a 6MB/4032x3024 photo produced a 4221-token request against a 4096-token
+# default context, which Ollama rejects outright). Both problems are fixed by
+# normalizing the image before it is sent.
+VISION_MAX_IMAGE_DIMENSION = int(os.environ.get("VISION_MAX_IMAGE_DIMENSION", "1280"))
+VISION_JPEG_QUALITY = int(os.environ.get("VISION_JPEG_QUALITY", "85"))
+VISION_MIN_CONFIDENCE = float(os.environ.get("VISION_MIN_CONFIDENCE", "0.3"))
+
+# Tiling: split into a 2x2 overlapping grid so a cluttered container photo
+# gives the model fewer objects to reason about per call, and small/bundled
+# items get more effective pixels-per-object than a single downscaled
+# overview. Opt-in (adds ~4x latency/API calls per photo) until validated
+# against a bigger golden set.
+VISION_TILING_ENABLED = os.environ.get("VISION_TILING_ENABLED", "false").lower() == "true"
+VISION_TILE_SOURCE_DIMENSION = int(os.environ.get("VISION_TILE_SOURCE_DIMENSION", "2400"))
+VISION_TILE_OVERLAP = float(os.environ.get("VISION_TILE_OVERLAP", "0.12"))
+
+
+def _load_oriented_image(image_path: Path) -> Image.Image:
+    try:
+        img = Image.open(image_path)
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        return img
+    except (OSError, ValueError) as exc:
+        raise VisionError(
+            "The uploaded photo could not be read as an image. Try taking the photo again."
+        ) from exc
+
+
+def _encode_jpeg(img: Image.Image, max_dimension: int) -> bytes:
+    resized = img.copy()
+    resized.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
+    buffer = io.BytesIO()
+    resized.save(buffer, format="JPEG", quality=VISION_JPEG_QUALITY)
+    return buffer.getvalue()
+
+
+def prepare_image_bytes(image_path: Path) -> bytes:
+    """Return JPEG bytes ready to send to the vision model.
+
+    Applies EXIF-orientation correction (so sideways/upside-down phone
+    photos are decoded upright) and downscales to ``VISION_MAX_IMAGE_DIMENSION``
+    on the long edge, which also keeps the request well under typical
+    context-window limits.
+    """
+    return _encode_jpeg(_load_oriented_image(image_path), VISION_MAX_IMAGE_DIMENSION)
+
+
+def generate_tile_bytes(image_path: Path) -> list[bytes]:
+    """Crop a 2x2 overlapping grid from a higher-resolution source than the
+    single overview pass, each re-encoded at the same token budget as the
+    overview image."""
+    source = _load_oriented_image(image_path)
+    source.thumbnail((VISION_TILE_SOURCE_DIMENSION, VISION_TILE_SOURCE_DIMENSION), Image.LANCZOS)
+    w, h = source.size
+    ow, oh = int(w * VISION_TILE_OVERLAP), int(h * VISION_TILE_OVERLAP)
+    mid_x, mid_y = w // 2, h // 2
+    boxes = [
+        (0, 0, min(mid_x + ow, w), min(mid_y + oh, h)),
+        (max(mid_x - ow, 0), 0, w, min(mid_y + oh, h)),
+        (0, max(mid_y - oh, 0), min(mid_x + ow, w), h),
+        (max(mid_x - ow, 0), max(mid_y - oh, 0), w, h),
+    ]
+    return [_encode_jpeg(source.crop(box), VISION_MAX_IMAGE_DIMENSION) for box in boxes]
+
+
+def merge_detections(groups: list[list[DetectedItem]]) -> list[DetectedItem]:
+    """Merge detections from multiple passes (overview + tiles).
+
+    Deduped by exact normalized name, keeping the highest-confidence
+    instance. Quantities are not summed across passes since overlapping
+    tiles can see the same physical item twice.
+    """
+    by_name: dict[str, DetectedItem] = {}
+    for group in groups:
+        for item in group:
+            key = item.name.strip().lower()
+            existing = by_name.get(key)
+            if existing is None or item.confidence > existing.confidence:
+                by_name[key] = item
+    return list(by_name.values())
 
 
 class VisionError(Exception):
@@ -224,9 +312,9 @@ class OllamaVisionProvider(VisionProvider):
         self.url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
         self.model = os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct")
 
-    def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
+    def _build_prompt(self) -> str:
         cats = ", ".join(f'"{c}"' for c in HOUSEHOLD_CATEGORIES)
-        prompt = (
+        return (
             "You are creating a conservative home inventory from one photo of an open storage container. "
             "List ONLY clearly visible physical objects. Do not guess hidden/occluded items. "
             "If uncertain, omit the item instead of guessing. "
@@ -236,7 +324,9 @@ class OllamaVisionProvider(VisionProvider):
             'Respond with ONLY this JSON, no prose, no markdown: '
             '{"items":[{"name":"...","quantity":1,"confidence":0.0,"category":"...","notes":"..."}]}'
         )
-        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+
+    def _call_model(self, prompt: str, image_bytes: bytes) -> list[DetectedItem]:
+        encoded = base64.b64encode(image_bytes).decode("ascii")
         try:
             response = requests.post(
                 self.url,
@@ -247,7 +337,7 @@ class OllamaVisionProvider(VisionProvider):
                     "stream": False,
                     "format": "json",
                     "think": False,
-                    "options": {"temperature": 0, "top_p": 0.1, "num_predict": 700},
+                    "options": {"temperature": 0, "top_p": 0.1, "num_predict": 700, "num_ctx": 8192},
                 },
                 timeout=120,
             )
@@ -268,13 +358,32 @@ class OllamaVisionProvider(VisionProvider):
                     f"The Ollama model '{self.model}' was not found. "
                     f"Run: ollama pull {self.model}"
                 ) from exc
-            raise VisionError("The vision service returned an error. Check the Ollama logs and try again.") from exc
+            detail = getattr(getattr(exc, "response", None), "text", "") or str(exc)
+            raise VisionError(f"The vision service returned an error: {detail[:300]}") from exc
         try:
             body = response.json()
         except ValueError as exc:
             raise VisionError("The vision service returned an unreadable response. Try again.") from exc
         text = body.get("response", "")
         return parse_detection_json(text, strict=True)
+
+    def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
+        prompt = self._build_prompt()
+        overview = self._call_model(prompt, prepare_image_bytes(image_path))
+        groups = [overview]
+
+        if VISION_TILING_ENABLED:
+            for tile_bytes in generate_tile_bytes(image_path):
+                try:
+                    groups.append(self._call_model(prompt, tile_bytes))
+                except VisionError:
+                    # Tiles are a supplementary pass; the overview result above
+                    # already succeeded, so a single failed tile call is skipped
+                    # rather than failing the whole detection.
+                    continue
+
+        merged = merge_detections(groups) if len(groups) > 1 else overview
+        return [item for item in merged if item.confidence >= VISION_MIN_CONFIDENCE]
 
 
 def get_provider() -> VisionProvider:

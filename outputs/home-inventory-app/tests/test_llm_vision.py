@@ -143,6 +143,7 @@ def test_parse_detection_json_strict_raises_user_safe_error():
 
 def test_ollama_provider_unreachable_raises_vision_error(monkeypatch):
     import requests as requests_module
+    from PIL import Image
 
     def boom(*args, **kwargs):
         raise requests_module.exceptions.ConnectionError("refused")
@@ -151,10 +152,17 @@ def test_ollama_provider_unreachable_raises_vision_error(monkeypatch):
     provider = vision.OllamaVisionProvider()
     image = ROOT / "test-data" / "fake.jpg"
     image.parent.mkdir(parents=True, exist_ok=True)
-    image.write_bytes(b"fake")
+    Image.new("RGB", (10, 10), color="red").save(image)
     with pytest.raises(VisionError) as exc_info:
         provider.detect(image)
     assert "Ollama" in str(exc_info.value)
+
+
+def test_load_oriented_image_rejects_unreadable_file(tmp_path):
+    bogus = tmp_path / "not_an_image.jpg"
+    bogus.write_bytes(b"this is not image data")
+    with pytest.raises(VisionError):
+        vision.prepare_image_bytes(bogus)
 
 
 # ---------------------------------------------------------------------------
