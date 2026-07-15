@@ -3,6 +3,29 @@
 <section class="dashboard-grid">
   <div class="hero-panel">
     <h1>Find it fast.</h1>
+    {% if external_url %}
+    <div class="external-url">
+      <strong>Open on your phone:</strong>
+      <a href="{{ external_url }}">{{ external_url }}</a>
+      <small>Make sure your phone is on the same Wi‑Fi network.</small>
+    </div>
+    {% endif %}
+    {% if llm_status %}
+    <div class="external-url">
+      <strong>LLM Vision Status:</strong>
+      <div>
+        Provider: {{ llm_status.provider }} |
+        Ollama running: {{ "yes" if llm_status.running else "no" }} |
+        Model: {{ llm_status.model }} |
+        Model available: {{ "yes" if llm_status.model_available else "no" }}
+      </div>
+      {% if llm_status.error %}
+      <small>{{ llm_status.error }}</small>
+      {% else %}
+      <small>Ollama endpoint: {{ llm_status.base_url }}</small>
+      {% endif %}
+    </div>
+    {% endif %}
     <form class="searchbar" action="/search">
       <input name="q" autofocus placeholder="Search item">
       <button>Search</button>

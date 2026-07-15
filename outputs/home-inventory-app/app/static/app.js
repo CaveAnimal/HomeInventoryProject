@@ -81,6 +81,30 @@ if (boxDetail) {
     if (res.ok) location.reload(); else toast("Upload failed");
   });
 
+  document.querySelectorAll("[data-reprocess-photo]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = "Running vision...";
+      const photoId = button.dataset.photoId;
+      const res = await fetch(`/api/boxes/${boxId}/photos/${photoId}/reprocess`, { method: "POST" });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.llm_used) {
+          toast(`LLM used (${json.model}) in ${json.duration_ms}ms. ${json.suggestions.length} suggestion(s).`);
+        } else {
+          const reason = json.vision_error || `provider=${json.provider}`;
+          toast(`LLM not used: ${reason}`);
+        }
+        setTimeout(() => location.reload(), 900);
+      } else {
+        toast("Vision rerun failed");
+        button.disabled = false;
+        button.textContent = original;
+      }
+    });
+  });
+
   document.querySelectorAll("[data-save-item]").forEach((button) => {
     button.addEventListener("click", async () => {
       const row = button.closest("[data-item-id]");
