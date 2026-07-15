@@ -82,7 +82,12 @@
         {% for suggestion in box["suggestions"] %}
         <div data-suggestion-id="{{ suggestion.id }}">
           <strong>{{ suggestion.item_name }}</strong>
-          <span>{{ "%.0f"|format(suggestion.confidence * 100) }}% · {{ suggestion.category or "uncategorized" }}</span>
+          <span>
+            qty {{ suggestion.quantity }} ·
+            {{ "%.0f"|format(suggestion.confidence * 100) }}% ·
+            {{ suggestion.category or "uncategorized" }}
+            {% if suggestion.notes %}· {{ suggestion.notes }}{% endif %}
+          </span>
           <button data-confirm-suggestion>Confirm</button>
           <button data-dismiss-suggestion>Dismiss</button>
         </div>
@@ -108,7 +113,10 @@
       </form>
       <div class="photo-grid">
         {% for photo in box["photos"] %}
-        <img src="/media/photos/{{ photo.filename }}" alt="{{ photo.original_filename }}">
+        <div>
+          <img src="/media/photos/{{ photo.filename }}" alt="{{ photo.original_filename }}">
+          <button class="button secondary" type="button" data-reprocess-photo data-photo-id="{{ photo.id }}">Run vision on this photo</button>
+        </div>
         {% endfor %}
       </div>
     </section>

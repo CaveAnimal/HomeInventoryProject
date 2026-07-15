@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import csv
 import io
+import time
 import shutil
 import uuid
 from pathlib import Path
 from typing import Annotated
+
+import os
+import socket
+
+import requests
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -58,12 +64,65 @@ def db():
         conn.close()
 
 
+def ollama_status() -> dict:
+    provider = os.environ.get("VISION_PROVIDER", "heuristic").lower()
+    model = os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct")
+    generate_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+    base_url = generate_url.split("/api/", 1)[0].rstrip("/")
+
+    status = {
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        "running": False,
+        "model_available": False,
+        "error": "",
+    }
+    if provider != "ollama":
+        status["error"] = "VISION_PROVIDER is not set to ollama"
+        return status
+
+    try:
+        response = requests.get(f"{base_url}/api/tags", timeout=2)
+        response.raise_for_status()
+        models = response.json().get("models", [])
+        names = {(entry.get("name") or "").strip() for entry in models if isinstance(entry, dict)}
+        requested = model.strip()
+        requested_base = requested.split(":", 1)[0]
+        status["running"] = True
+        status["model_available"] = requested in names or any(name.split(":", 1)[0] == requested_base for name in names)
+    except requests.exceptions.RequestException as exc:
+        status["error"] = f"{type(exc).__name__}: {exc}"
+    except Exception as exc:
+        status["error"] = f"{type(exc).__name__}: {exc}"
+    return status
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, conn=Depends(db)):
     boxes = list_boxes(conn)
     rooms = rows(conn.execute("SELECT room_name, COUNT(*) AS count FROM box_locations GROUP BY room_name ORDER BY room_name"))
     recent = rows(conn.execute("SELECT * FROM edit_history ORDER BY created_at DESC LIMIT 8"))
-    return templates.TemplateResponse("dashboard.html", {"request": request, "boxes": boxes, "rooms": rooms, "recent": recent})
+    # Build an external URL that a phone on the same LAN can use.
+    # Host/port can be overridden with env vars HOME_INVENTORY_HOST and HOME_INVENTORY_PORT.
+    host_env = os.environ.get("HOME_INVENTORY_HOST", "127.0.0.1")
+    port_env = os.environ.get("HOME_INVENTORY_PORT", "8000")
+    display_host = host_env
+    if host_env in ("0.0.0.0", "::", ""):
+        # detect a likely local LAN IP without sending traffic
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                display_host = s.getsockname()[0]
+        except Exception:
+            display_host = "127.0.0.1"
+    external_url = f"http://{display_host}:{port_env}"
+    llm_status = ollama_status()
+
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {"request": request, "boxes": boxes, "rooms": rooms, "recent": recent, "external_url": external_url, "llm_status": llm_status},
+    )
 
 
 @app.get("/boxes", response_class=HTMLResponse)
@@ -333,6 +392,9 @@ async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) ->
     user-safe error message is returned instead of raising, so the API
     response stays actionable and no data is corrupted.
     """
+    provider_name = os.environ.get("VISION_PROVIDER", "ollama").lower()
+    if provider_name != "ollama":
+        return [], f"LLM vision not used: VISION_PROVIDER is '{provider_name}', expected 'ollama'."
     provider = get_provider()
     suggestions: list[dict] = []
     vision_error: str | None = None
@@ -345,11 +407,13 @@ async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) ->
         with destination.open("wb") as handle:
             shutil.copyfileobj(upload.file, handle)
         photo_id = add_photo(conn, box_id, stored_name, upload.filename, upload.content_type or "")
+        t0 = time.perf_counter()
         try:
             detected = provider.detect(destination, original_name=upload.filename)
         except VisionError as exc:
             vision_error = str(exc)
             continue
+        duration_ms = int((time.perf_counter() - t0) * 1000)
         for item in detected:
             suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
             suggestions.append(
@@ -360,9 +424,74 @@ async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) ->
                     "confidence": item.confidence,
                     "category": item.category,
                     "notes": item.notes,
+                    "provider": provider_name,
+                    "llm_used": True,
+                    "model": os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct"),
+                    "duration_ms": duration_ms,
                 }
             )
     return suggestions, vision_error
+
+
+def detect_existing_photo(conn, box_id: int, photo_id: int) -> tuple[list[dict], str | None, dict]:
+    """Run vision on an already-saved photo and refresh suggestions for it.
+
+    Existing unresolved suggestions from the same photo are marked dismissed
+    before adding a fresh detection batch.
+    """
+    photo = conn.execute("SELECT * FROM box_photos WHERE id = ? AND box_id = ?", (photo_id, box_id)).fetchone()
+    if not photo:
+        raise HTTPException(404, "Photo not found")
+
+    image_path = PHOTO_DIR / photo["filename"]
+    if not image_path.exists():
+        raise HTTPException(404, "Photo file not found")
+
+    conn.execute(
+        "UPDATE detection_suggestions SET status = 'dismissed' WHERE photo_id = ? AND status = 'suggested'",
+        (photo_id,),
+    )
+
+    provider_name = os.environ.get("VISION_PROVIDER", "ollama").lower()
+    meta = {
+        "provider": provider_name,
+        "llm_used": False,
+        "model": os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct"),
+        "duration_ms": 0,
+    }
+    if provider_name != "ollama":
+        return [], f"LLM vision not used: VISION_PROVIDER is '{provider_name}', expected 'ollama'.", meta
+
+    provider = get_provider()
+    suggestions: list[dict] = []
+    vision_error: str | None = None
+    t0 = time.perf_counter()
+    try:
+        detected = provider.detect(image_path, original_name=photo["original_filename"])
+    except VisionError as exc:
+        vision_error = str(exc)
+        meta["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+        return suggestions, vision_error, meta
+    meta["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+    meta["llm_used"] = True
+
+    for item in detected:
+        suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
+        suggestions.append(
+            {
+                "id": suggestion_id,
+                "name": item.name,
+                "quantity": item.quantity,
+                "confidence": item.confidence,
+                "category": item.category,
+                "notes": item.notes,
+                "provider": provider_name,
+                "llm_used": True,
+                "model": meta["model"],
+                "duration_ms": meta["duration_ms"],
+            }
+        )
+    return suggestions, vision_error, meta
 
 
 @app.delete("/api/boxes/{box_id}")
@@ -373,6 +502,21 @@ def api_delete_box(box_id: int, conn=Depends(db)):
     record_history(conn, "container", box_id, "deleted", before={"name": box["name"]})
     conn.execute("DELETE FROM boxes WHERE id = ?", (box_id,))
     return {"ok": True}
+
+
+@app.post("/api/boxes/{box_id}/photos/{photo_id}/reprocess")
+def api_reprocess_photo(box_id: int, photo_id: int, conn=Depends(db)):
+    if not get_box(conn, box_id=box_id):
+        raise HTTPException(404, "Container not found")
+    suggestions, vision_error, meta = detect_existing_photo(conn, box_id, photo_id)
+    return {
+        "suggestions": suggestions,
+        "vision_error": vision_error,
+        "provider": meta["provider"],
+        "llm_used": meta["llm_used"],
+        "model": meta["model"],
+        "duration_ms": meta["duration_ms"],
+    }
 
 
 @app.patch("/api/boxes/{box_id}")

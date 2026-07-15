@@ -37,7 +37,6 @@ from pathlib import Path
 import requests
 
 from ..categories import HOUSEHOLD_CATEGORIES
-from ..settings import VISION_PROVIDER
 
 FALLBACK_CATEGORY = "Unknown / Needs Review"
 MAX_NAME_LENGTH = 120
@@ -223,13 +222,15 @@ class HeuristicVisionProvider(VisionProvider):
 class OllamaVisionProvider(VisionProvider):
     def __init__(self) -> None:
         self.url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
-        self.model = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
+        self.model = os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct")
 
     def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
         cats = ", ".join(f'"{c}"' for c in HOUSEHOLD_CATEGORIES)
         prompt = (
-            "You are creating a strict home inventory from one photo of an open storage container. "
-            "List each distinct physical object you can see, with a count. "
+            "You are creating a conservative home inventory from one photo of an open storage container. "
+            "List ONLY clearly visible physical objects. Do not guess hidden/occluded items. "
+            "If uncertain, omit the item instead of guessing. "
+            "Use quantity > 1 only when multiple instances are clearly visible. "
             f"category MUST be exactly one of: {cats}. "
             "confidence is a number between 0 and 1. "
             'Respond with ONLY this JSON, no prose, no markdown: '
@@ -245,6 +246,8 @@ class OllamaVisionProvider(VisionProvider):
                     "images": [encoded],
                     "stream": False,
                     "format": "json",
+                    "think": False,
+                    "options": {"temperature": 0, "top_p": 0.1, "num_predict": 700},
                 },
                 timeout=120,
             )
@@ -274,40 +277,10 @@ class OllamaVisionProvider(VisionProvider):
         return parse_detection_json(text, strict=True)
 
 
-class OpenAIVisionProvider(VisionProvider):
-    def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            return HeuristicVisionProvider().detect(image_path, original_name)
-        mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
-        data_url = f"data:{mime};base64,{base64.b64encode(image_path.read_bytes()).decode('ascii')}"
-        payload = {
-            "model": os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini"),
-            "input": [{
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": f"List visible storage-box objects as JSON with items: name, quantity, confidence, category (one of: {', '.join(HOUSEHOLD_CATEGORIES)}), notes."},
-                    {"type": "input_image", "image_url": data_url},
-                ],
-            }],
-        }
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/responses",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-                timeout=90,
-            )
-            response.raise_for_status()
-        except requests.exceptions.RequestException as exc:
-            raise VisionError("The cloud vision service could not be reached. Try again later.") from exc
-        text = json.dumps(response.json())
-        return parse_detection_json(text)
-
-
 def get_provider() -> VisionProvider:
-    if VISION_PROVIDER == "ollama":
+    provider = os.environ.get("VISION_PROVIDER", "ollama").lower()
+    if provider == "ollama":
         return OllamaVisionProvider()
-    if VISION_PROVIDER == "openai":
-        return OpenAIVisionProvider()
+    if provider == "heuristic":
+        return HeuristicVisionProvider()
     return HeuristicVisionProvider()

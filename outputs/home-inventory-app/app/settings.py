@@ -11,7 +11,7 @@ DB_PATH = Path(os.environ.get("HOME_INVENTORY_DB", DATA_DIR / "inventory.sqlite3
 # /import page to attach them to containers and generate item lists.
 IMPORT_DIR = Path(os.environ.get("HOME_INVENTORY_IMPORT", DATA_DIR / "import-inbox"))
 IMPORT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "heuristic").lower()
+VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "ollama").lower()
 APP_NAME = "Home Inventory"
 
 
