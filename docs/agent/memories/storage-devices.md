@@ -1,0 +1,7 @@
+- User has local E: drive labeled WD_BLACK.
+- User has a first-generation WD My Cloud at http://192.168.86.38/UI/.
+- Relevant NAS share name is WD_Black.
+- User wants future queries to remember this storage/NAS context.
+- WD_Black share is currently reachable at \\wdmycloud\WD_Black over SMB.
+- Public Access is currently on for WD_Black.
+- admin password switch is off; user expects no-password behavior for this first-generation My Cloud.
