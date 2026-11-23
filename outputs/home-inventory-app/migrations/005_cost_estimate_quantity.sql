@@ -1,0 +1,1 @@
+ALTER TABLE cost_estimates ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1;

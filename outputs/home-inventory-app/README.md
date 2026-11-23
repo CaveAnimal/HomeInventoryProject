@@ -13,6 +13,7 @@ A local-first home inventory web app for cataloging physical items in storage bo
 - Search by item name with forgiving partial matching, tags, rooms, category, confidence, and similar-item suggestions.
 - Export inventory data as JSON or CSV.
 - Keep an edit history for boxes, items, locations, labels, and detections.
+- Optionally look up an estimated replacement cost for confirmed items (opt-in, disabled by default).
 
 ## Project Structure
 
@@ -24,6 +25,7 @@ home-inventory-app/
     repository.py           Data-access helpers
     settings.py             Local paths and runtime settings
     services/
+      cost_lookup.py        Opt-in replacement-cost lookup providers
       labels.py             QR code and label generation
       search.py             Search normalization and similar matches
       vision.py             Pluggable image recognition providers
@@ -59,17 +61,69 @@ For iPhone access on your home network, find your computer's local IP address an
 
 The app is local-first. The vision module is deliberately swappable:
 
-- `VISION_PROVIDER=heuristic` is the default. It extracts likely item names from image filenames and provides useful demo behavior without sending photos anywhere.
-- `VISION_PROVIDER=ollama` uses a local Ollama vision model on your computer. Example:
+- `VISION_PROVIDER=bonsai` is the default. It uses Ternary-Bonsai-2-27B (a Qwen port with vision) served by a local llama.cpp `llama-server` with `--mmproj`. Live capture runs with thinking off (~7s per photo); the nightly deep scan reuses the same model with thinking on (~25s, catches more small items). Bonsai also does the cost-lookup extraction step.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BONSAI_URL` | `http://127.0.0.1:1080` | Base URL of the Bonsai llama-server. |
+| `BONSAI_VISION_MODEL` | `bonsai2-27b` | Label recorded with each detection (llama-server serves one model and ignores the name). |
+| `BONSAI_VISION_THINKING` | `false` | Turn the reasoning pass on for live capture. |
+| `BONSAI_VISION_MAX_TOKENS` | `2000` | Response token budget. |
+| `BONSAI_REPROCESS_VISION_MODEL` | `bonsai2-27b-thinking` | Deep-scan label; photos are re-scanned once per label. |
+
+- `VISION_PROVIDER=ollama` uses a local Ollama vision model instead (`OLLAMA_VISION_MODEL`, deep scan `OLLAMA_REPROCESS_VISION_MODEL`). `.\start.ps1 -VisionProvider ollama` switches everything back to Ollama.
+- `VISION_PROVIDER=lmstudio` points the same OpenAI-compatible client at LM Studio (`LMSTUDIO_URL`, `LMSTUDIO_VISION_MODEL`).
+- `VISION_PROVIDER=heuristic` guesses item names from filenames only; the capture endpoints refuse it so it is never mistaken for a real detection pass.
+
+## Estimated Replacement Cost (opt-in)
+
+Confirmed items can get an estimated replacement cost for insurance documentation: a web search finds current prices, and the local Bonsai model extracts a structured estimate (`estimated_cost_usd`, `confidence`, `source_title`, `source_url`). The feature is **disabled by default** and never runs automatically — estimates are always a deliberate user action from the container detail page ("Estimate cost" per item, or "Estimate all" for a container).
+
+### Enabling it
 
 ```powershell
-ollama pull llama3.2-vision
-$env:VISION_PROVIDER="ollama"
-$env:OLLAMA_VISION_MODEL="llama3.2-vision"
+$env:COST_LOOKUP_PROVIDER="tavily"
+$env:COST_LOOKUP_API_KEY="your-tavily-api-key"
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-- `VISION_PROVIDER=openai` is available only if you choose to configure `OPENAI_API_KEY`. It sends images to OpenAI, so leave it off if you want photos to remain entirely local.
+### Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `COST_LOOKUP_PROVIDER` | `disabled` | `tavily` enables the feature. `disabled`, unset, or any unrecognized value resolves to a no-op provider that makes zero network calls (the kill switch). |
+| `COST_LOOKUP_API_KEY` | unset | Search-provider API key. Falls back to `TAVILY_API_KEY` if unset. |
+| `COST_LOOKUP_MONTHLY_LIMIT` | `50` | App-side monthly budget guard. Once this many lookups have been recorded in the current calendar month, further lookups are refused with a clear error until the month rolls over. |
+| `COST_LOOKUP_LLM` | `bonsai` | Local model for the extraction step: `bonsai` (uses `BONSAI_URL`) or `ollama`. |
+| `COST_LOOKUP_OLLAMA_MODEL` | `llama3.2` | Extraction model when `COST_LOOKUP_LLM=ollama`. Reuses `OLLAMA_URL`. |
+
+### Privacy guarantees
+
+- Only the item **name and category** ever leave the device — never photos, notes, box or room locations, or any other inventory data.
+- Batch requests ("Estimate all") fan out into one outbound search request **per item**; multiple items are never combined into a single request, so the search provider never sees the shape of your inventory.
+- All reasoning over search results runs on your **local Bonsai** model (or Ollama if configured); no cloud LLM is involved.
+- Estimates must cite a source URL that actually appeared in the search results; anything without a verifiable source is rejected rather than stored.
+
+### Excluded categories and per-item opt-out
+
+- Items in the `Documents & Paper` and `Sentimental / Keepsakes` categories are excluded by default. The exclusion is enforced before any network call — not just hidden in the UI.
+- To opt out a single item of any category, add the reserved tag `no-cost-lookup` to the item's tags. Lookups for that item are refused until the tag is removed.
+
+### History
+
+Estimates are insert-only history, never overwritten: re-estimating an item adds a new row so price changes stay auditable over time. The UI shows the latest estimate with its confidence, source link, and age.
+
+### Kill switch and rollback
+
+1. Set `COST_LOOKUP_PROVIDER=disabled` (or unset it) to stop all network egress for this feature immediately.
+2. Cost-estimate UI elements degrade to "not available" without affecting existing item/photo/detection flows.
+3. If needed, the `cost_estimates` table can be dropped without affecting `box_items` — the feature adds no columns to the core item table.
+
+### Key API endpoints
+
+- `POST /api/items/{id}/cost-estimate` — estimate one item; returns the new estimate, or a 422 with a clear message when the feature is disabled, the category is excluded, the item is opted out, or the monthly limit is reached.
+- `POST /api/boxes/{id}/cost-estimates` — "estimate all" for a container; returns `{"estimated": [...], "skipped": [...], "failed": [...]}` with a per-item reason for anything skipped or failed.
+- `GET /api/items/{id}/cost-estimates` — returns `{"latest": ..., "history": [...]}` for an item.
 
 ## Mobile Capture Flow (llm_vision)
 
@@ -80,7 +134,7 @@ The `/capture` page is the iPhone-first entry point:
 3. Take a photo. The strict detection list appears on the same page with item name, editable count, confidence, and category.
 4. Uncheck wrong items, fix counts, then tap **Confirm Selected Items**. Confirmed items are saved to inventory with status `confirmed`; unchecked ones are recorded as `dismissed` and never enter inventory. Both are tracked in edit history.
 
-If the Ollama vision service is unreachable or returns malformed output, the photo is still saved and the page shows an actionable error message.
+If the local vision service (Bonsai or Ollama) is unreachable or returns malformed output, the photo is still saved and the page shows an actionable error message.
 
 ### Key API endpoints
 - `POST /api/capture/containers` — inline container creation; returns `container_id`, `public_id`, `capture_url`.
@@ -127,3 +181,4 @@ pytest
 - Photos, QR images, and the generated database stay under the local `data/` directory.
 - QR codes point to the box detail URL rather than embedding inventory data, so labels keep working as contents and locations change.
 - Image recognition is isolated behind `VisionProvider`, making it easy to switch between local and cloud models without touching the rest of the app.
+- Cost lookup follows the same pattern behind `CostLookupProvider`, so the search backend can be swapped (or fully disabled) via `COST_LOOKUP_PROVIDER` without touching callers.

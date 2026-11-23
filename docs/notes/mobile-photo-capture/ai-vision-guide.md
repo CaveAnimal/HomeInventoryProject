@@ -102,6 +102,30 @@ OLLAMA_VISION_MODEL=llama3.2-vision              # default
 
 Photos never leave your machine. Good choice for a home inventory with sensitive documents or valuables.
 
+#### Two-tier model setup (fast capture + nightly deep scan)
+
+Live capture always uses the fast model (`OLLAMA_VISION_MODEL`, default
+`qwen3-vl:8b-instruct`) so a photo returns suggestions in a couple seconds.
+A separate, larger model can re-scan every stored photo overnight to catch
+items the fast pass missed, without slowing down capture:
+
+```
+OLLAMA_REPROCESS_VISION_MODEL=qwen3-vl:30b   # default
+```
+
+Run it manually, or schedule it nightly (cron / Windows Task Scheduler):
+
+```bash
+python -m app.nightly_reprocess
+```
+
+Each photo is only reprocessed once per model -- changing
+`OLLAMA_REPROCESS_VISION_MODEL` later makes every photo pending again under
+the new model. Deep-scan results are added as *additional* suggestions
+(never replacing the fast pass) and show a "deep scan" badge on the
+container page. The admin page (`/admin`) shows how many photos are
+currently pending a deep scan.
+
 ### OpenAI (cloud — highest accuracy)
 
 Uses GPT-4.1 mini vision via the OpenAI API. Requires an API key.

@@ -181,7 +181,14 @@ def update_box_location(conn: sqlite3.Connection, box_id: int, room_name: str, n
         (room_name, north_ft, east_ft, elevation_ft, box_id),
     )
     conn.execute("UPDATE boxes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box_id,))
-    record_history(conn, "box", box_id, "location_updated", before=before, after=locals())
+    record_history(
+        conn,
+        "box",
+        box_id,
+        "location_updated",
+        before=before,
+        after={"room_name": room_name, "north_ft": north_ft, "east_ft": east_ft, "elevation_ft": elevation_ft},
+    )
 
 
 def update_box(conn: sqlite3.Connection, box_id: int, **fields: Any) -> None:
@@ -211,13 +218,46 @@ def add_photo(conn: sqlite3.Connection, box_id: int, filename: str, original_fil
     return int(cur.lastrowid)
 
 
-def add_detection(conn: sqlite3.Connection, box_id: int, photo_id: int | None, item_name: str, confidence: float, quantity: int = 1, category: str = "", notes: str = "") -> int:
+def add_detection(
+    conn: sqlite3.Connection,
+    box_id: int,
+    photo_id: int | None,
+    item_name: str,
+    confidence: float,
+    quantity: int = 1,
+    category: str = "",
+    notes: str = "",
+    source_model: str = "",
+    pass_type: str = "live",
+) -> int:
     cur = conn.execute(
-        """INSERT INTO detection_suggestions(box_id, photo_id, item_name, quantity, confidence, category, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (box_id, photo_id, item_name.strip(), quantity, confidence, category, notes),
+        """INSERT INTO detection_suggestions(box_id, photo_id, item_name, quantity, confidence, category, notes, source_model, pass_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (box_id, photo_id, item_name.strip(), quantity, confidence, category, notes, source_model, pass_type),
     )
     return int(cur.lastrowid)
+
+
+def list_photos_pending_deep_scan(conn: sqlite3.Connection, model: str) -> list[dict[str, Any]]:
+    """Photos not yet reprocessed by ``model`` (the nightly deep-scan pass).
+
+    A photo previously scanned by a *different* model (e.g. after upgrading
+    OLLAMA_REPROCESS_VISION_MODEL) is treated as pending again, so switching
+    models naturally re-scans everything with the new one.
+    """
+    return rows(
+        conn.execute(
+            "SELECT * FROM box_photos WHERE deep_scan_model != ? ORDER BY created_at",
+            (model,),
+        )
+    )
+
+
+def mark_photo_deep_scanned(conn: sqlite3.Connection, photo_id: int, model: str) -> None:
+    conn.execute(
+        "UPDATE box_photos SET deep_scan_model = ?, deep_scanned_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (model, photo_id),
+    )
 
 
 def add_item_to_box(
@@ -240,6 +280,10 @@ def add_item_to_box(
     conn.execute("UPDATE boxes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box_id,))
     record_history(conn, "box_item", int(cur.lastrowid), "created", after={"box_id": box_id, "item_name": item_name})
     return int(cur.lastrowid)
+
+
+def get_box_item(conn: sqlite3.Connection, item_id: int) -> dict[str, Any] | None:
+    return row(conn.execute("SELECT * FROM box_items WHERE id = ?", (item_id,)))
 
 
 def update_box_item(conn: sqlite3.Connection, item_id: int, **fields: Any) -> None:
@@ -320,6 +364,91 @@ def resolve_merged_detections(conn: sqlite3.Connection, duplicate_ids: list[int]
         record_history(conn, "detection", duplicate_id, "merged", after={"box_item_id": item_id, "merged_into_suggestion": primary_id})
         resolved += 1
     return resolved
+
+
+def add_cost_estimate(
+    conn: sqlite3.Connection,
+    box_item_id: int,
+    estimated_cost_usd: float | None,
+    confidence: float = 0.5,
+    source_title: str = "",
+    source_url: str = "",
+    quantity: int = 1,
+) -> int:
+    """Append a cost-estimate history row for ``box_item_id``.
+
+    Insert-only: cost estimates are never updated or overwritten in place,
+    so price history stays auditable. Use ``latest_cost_estimate()`` to read
+    the current value. ``quantity`` snapshots the item's on-hand quantity at
+    estimate time; the estimated cost is per unit.
+    """
+    cur = conn.execute(
+        """INSERT INTO cost_estimates(box_item_id, estimated_cost_usd, confidence, source_title, source_url, quantity)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (box_item_id, estimated_cost_usd, confidence, source_title, source_url, quantity),
+    )
+    record_history(
+        conn,
+        "box_item",
+        box_item_id,
+        "cost_estimated",
+        after={
+            "estimated_cost_usd": estimated_cost_usd,
+            "confidence": confidence,
+            "source_url": source_url,
+            "quantity": quantity,
+        },
+    )
+    return int(cur.lastrowid)
+
+
+def list_cost_estimates_for_item(conn: sqlite3.Connection, box_item_id: int) -> list[dict[str, Any]]:
+    return rows(
+        conn.execute(
+            "SELECT * FROM cost_estimates WHERE box_item_id = ? ORDER BY created_at DESC, id DESC",
+            (box_item_id,),
+        )
+    )
+
+
+def latest_cost_estimate(conn: sqlite3.Connection, box_item_id: int) -> dict[str, Any] | None:
+    return row(
+        conn.execute(
+            "SELECT * FROM cost_estimates WHERE box_item_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (box_item_id,),
+        )
+    )
+
+
+def count_cost_estimates_this_month(conn: sqlite3.Connection) -> int:
+    """Count cost-estimate lookups recorded in the current UTC calendar month.
+
+    Derived query over ``cost_estimates.created_at`` (D-006) rather than a
+    separate counter table/row -- ``created_at`` is populated by SQLite's
+    ``CURRENT_TIMESTAMP`` (UTC), so comparing its year-month against
+    ``strftime('%Y-%m', 'now')`` (also UTC) gives a counter that resets
+    naturally at each month boundary with no extra bookkeeping.
+    """
+    found = row(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM cost_estimates "
+            "WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')"
+        )
+    )
+    return int(found["n"]) if found else 0
+
+
+def get_setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    found = row(conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)))
+    return found["value"] if found else default
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """INSERT INTO app_settings(key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP""",
+        (key, value),
+    )
 
 
 def normalize(value: str) -> str:

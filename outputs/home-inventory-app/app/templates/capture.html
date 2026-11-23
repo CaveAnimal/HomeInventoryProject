@@ -15,12 +15,20 @@
 
   <main class="capture-page">
 
+
     {% if not container %}
     <section class="capture-card">
       <h1>Start a new box</h1>
       <p class="capture-hint">Creates a new container (type: box) so you can photograph it right away.</p>
       <input id="newName" type="text" placeholder="Name (optional — auto-generated)" autocomplete="off">
-      <input id="newRoom" type="text" placeholder="Room (optional)" autocomplete="off">
+      <select id="newRoom">
+        <option value="" selected>Room (optional)</option>
+        {% for room in room_options %}
+        <option value="{{ room }}">{{ room }}</option>
+        {% endfor %}
+        <option value="__custom__">Custom room…</option>
+      </select>
+      <input id="newRoomCustom" type="text" placeholder="Type room name" autocomplete="off" hidden>
       <button id="createBtn" class="capture-btn" type="button">Create &amp; Start Capturing</button>
       <div id="createError" class="capture-status error" hidden>Could not create the container. Try again.</div>
     </section>
@@ -76,6 +84,65 @@
         <button id="anotherBtn" class="capture-secondary" hidden>Take Another Photo</button>
         <a class="capture-secondary-link" href="/boxes/{{ container.id }}">Done — review items</a>
       </div>
+    </section>
+
+    <section class="capture-card">
+      <h2>Location</h2>
+      <div class="loc-grid">
+        <label>Room
+          <select id="locRoom">
+            {% if not container.room_name or container.room_name == "unassigned" %}
+            <option value="unassigned" selected>— choose room —</option>
+            {% elif container.room_name not in room_options %}
+            <option value="{{ container.room_name }}" selected>{{ container.room_name }}</option>
+            {% endif %}
+            {% for room in room_options %}
+            <option value="{{ room }}" {% if room == container.room_name %}selected{% endif %}>{{ room }}</option>
+            {% endfor %}
+            <option value="__custom__">Custom room…</option>
+          </select>
+          <input id="locRoomCustom" type="text" placeholder="Type room name" autocomplete="off" hidden>
+        </label>
+        <label>N ft <input id="locN" type="number" step="0.1" inputmode="decimal" value="{{ container.north_ft }}"></label>
+        <label>E ft <input id="locE" type="number" step="0.1" inputmode="decimal" value="{{ container.east_ft }}"></label>
+        <label>H ft <input id="locH" type="number" step="0.1" inputmode="decimal" value="{{ container.elevation_ft }}"></label>
+      </div>
+      <button id="saveLocBtn" class="capture-secondary" type="button">Save Location</button>
+      <div id="locStatus" class="capture-status" hidden></div>
+    </section>
+
+    <section class="capture-card">
+      <h2>Items ({{ container["items"] | length }})</h2>
+      <div id="itemsList" class="item-edit-list">
+        {% for item in container["items"] %}
+        <div class="item-edit-row" data-item-id="{{ item.id }}">
+          <div class="item-edit-fields">
+            <input class="item-edit-name" type="text" value="{{ item.item_name }}" autocomplete="off">
+            <input class="item-edit-qty" type="number" min="1" inputmode="numeric" value="{{ item.quantity }}">
+            <button class="item-edit-save" type="button">Save</button>
+            <button class="item-edit-del" type="button" aria-label="Remove {{ item.item_name }}">&#10005;</button>
+          </div>
+          <small class="item-edit-meta">
+            {% if item.latest_cost_estimate and item.latest_cost_estimate.estimated_cost_usd is not none %}
+            ${{ "%.2f"|format(item.latest_cost_estimate.estimated_cost_usd) }}
+            {%- set est_qty = item.latest_cost_estimate.quantity or 1 %}
+            {%- if est_qty > 1 %} × {{ est_qty }} = ${{ "%.2f"|format(item.latest_cost_estimate.estimated_cost_usd * est_qty) }}{% endif %}
+            · as of {{ item.latest_cost_estimate.created_at }}
+            {% else %}
+            no cost estimate yet
+            {% endif %}
+          </small>
+        </div>
+        {% else %}
+        <p class="capture-hint">No items yet — take a photo above or add one below.</p>
+        {% endfor %}
+      </div>
+      <div class="item-add-row">
+        <input id="addItemName" type="text" placeholder="New item name" autocomplete="off">
+        <input id="addItemQty" type="number" min="1" inputmode="numeric" value="1">
+        <button id="addItemBtn" class="capture-secondary" type="button">Add</button>
+      </div>
+      <div id="itemsStatus" class="capture-status" hidden></div>
     </section>
 
     <script>
@@ -205,6 +272,109 @@
         anotherBtn.hidden = true;
         photoInput.click();
       });
+
+      // --- Location editing ---
+      const locStatus = document.getElementById("locStatus");
+      const locRoom = document.getElementById("locRoom");
+      const locRoomCustom = document.getElementById("locRoomCustom");
+      locRoom.addEventListener("change", () => {
+        locRoomCustom.hidden = locRoom.value !== "__custom__";
+        if (!locRoomCustom.hidden) locRoomCustom.focus();
+      });
+      function chosenRoom(select, custom) {
+        if (select.value === "__custom__") return custom.value.trim() || "unassigned";
+        return select.value.trim() || "unassigned";
+      }
+      document.getElementById("saveLocBtn").addEventListener("click", async (e) => {
+        e.target.disabled = true;
+        locStatus.hidden = true;
+        try {
+          const res = await fetch(`/api/boxes/${boxId}/location`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              room_name: chosenRoom(locRoom, locRoomCustom),
+              north_ft: Number(document.getElementById("locN").value) || 0,
+              east_ft: Number(document.getElementById("locE").value) || 0,
+              elevation_ft: Number(document.getElementById("locH").value) || 0,
+            }),
+          });
+          if (!res.ok) throw new Error();
+          locStatus.textContent = "Location saved.";
+          locStatus.classList.remove("error");
+        } catch {
+          locStatus.textContent = "Could not save location. Try again.";
+          locStatus.classList.add("error");
+        }
+        locStatus.hidden = false;
+        e.target.disabled = false;
+      });
+
+      // --- Item editing ---
+      const itemsStatus = document.getElementById("itemsStatus");
+      function showItemsStatus(text, isError) {
+        itemsStatus.textContent = text;
+        itemsStatus.classList.toggle("error", !!isError);
+        itemsStatus.hidden = false;
+      }
+
+      document.getElementById("itemsList").addEventListener("click", async (e) => {
+        const row = e.target.closest(".item-edit-row");
+        if (!row) return;
+        const itemId = row.dataset.itemId;
+
+        if (e.target.classList.contains("item-edit-save")) {
+          e.target.disabled = true;
+          try {
+            const res = await fetch(`/api/box-items/${itemId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                item_name: row.querySelector(".item-edit-name").value.trim(),
+                quantity: Math.max(1, Number(row.querySelector(".item-edit-qty").value) || 1),
+              }),
+            });
+            if (!res.ok) throw new Error();
+            showItemsStatus("Item saved.");
+          } catch {
+            showItemsStatus("Could not save item. Try again.", true);
+          }
+          e.target.disabled = false;
+        }
+
+        if (e.target.classList.contains("item-edit-del")) {
+          const name = row.querySelector(".item-edit-name").value;
+          if (!window.confirm(`Remove "${name}" from this container?`)) return;
+          try {
+            const res = await fetch(`/api/box-items/${itemId}`, { method: "DELETE" });
+            if (!res.ok) throw new Error();
+            row.remove();
+            showItemsStatus(`Removed "${name}".`);
+          } catch {
+            showItemsStatus("Could not remove item. Try again.", true);
+          }
+        }
+      });
+
+      document.getElementById("addItemBtn").addEventListener("click", async (e) => {
+        const nameInput = document.getElementById("addItemName");
+        const qtyInput = document.getElementById("addItemQty");
+        const name = nameInput.value.trim();
+        if (!name) { nameInput.focus(); return; }
+        e.target.disabled = true;
+        try {
+          const res = await fetch(`/api/boxes/${boxId}/items`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ item_name: name, quantity: Math.max(1, Number(qtyInput.value) || 1) }),
+          });
+          if (!res.ok) throw new Error();
+          window.location.reload();
+        } catch {
+          showItemsStatus("Could not add item. Try again.", true);
+          e.target.disabled = false;
+        }
+      });
     </script>
     {% endif %}
 
@@ -221,12 +391,21 @@
 
       const createBtn = document.getElementById("createBtn");
       const createError = document.getElementById("createError");
+      const newRoom = document.getElementById("newRoom");
+      const newRoomCustom = document.getElementById("newRoomCustom");
+      newRoom.addEventListener("change", () => {
+        newRoomCustom.hidden = newRoom.value !== "__custom__";
+        if (!newRoomCustom.hidden) newRoomCustom.focus();
+      });
       createBtn.addEventListener("click", async () => {
         createBtn.disabled = true;
         createError.hidden = true;
+        const roomValue = newRoom.value === "__custom__"
+          ? (newRoomCustom.value.trim() || "unassigned")
+          : (newRoom.value.trim() || "unassigned");
         const data = new FormData();
         data.append("name", document.getElementById("newName").value.trim());
-        data.append("room_name", document.getElementById("newRoom").value.trim() || "unassigned");
+        data.append("room_name", roomValue);
         try {
           const res = await fetch("/api/capture/containers", { method: "POST", body: data });
           if (!res.ok) throw new Error();

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="section-heading">
+  <h1>Admin</h1>
+</div>
+<section>
+  <h2>Export data</h2>
+  <div class="quick-actions">
+    <a class="button secondary" href="/export.csv">Export CSV</a>
+    <a class="button secondary" href="/export.json">Export JSON</a>
+  </div>
+</section>
+<section>
+  <h2>Nightly deep scan</h2>
+  <p>
+    Live capture uses the fast vision model for instant suggestions. A separate,
+    larger model can re-scan every stored photo overnight to catch items the
+    fast pass missed, without slowing down capture.
+  </p>
+  <p id="deep-scan-status">Checking status&hellip;</p>
+  <div class="quick-actions">
+    <button id="deep-scan-arm-button" class="button" type="button">Enable</button>
+  </div>
+  <p style="font-size: 0.85rem; color: var(--muted);">
+    Also runnable directly: <code>python -m app.nightly_reprocess</code>
+  </p>
+</section>
+<script>
+  const statusEl = document.getElementById("deep-scan-status");
+  const buttonEl = document.getElementById("deep-scan-arm-button");
+
+  function renderStatus(data) {
+    const lastRun = data.last_run_date ? `last ran ${data.last_run_date}` : "never run yet";
+    const armedText = data.armed
+      ? `Armed -- will run tonight around ${String(data.scheduled_hour).padStart(2, "0")}:00.`
+      : "Not armed.";
+    statusEl.textContent =
+      `Model: ${data.model} · ${data.pending_count} photo(s) awaiting deep scan · ${armedText} · ${lastRun}`;
+    buttonEl.textContent = data.armed ? "Cancel tonight's scan" : "Run tonight";
+    buttonEl.dataset.armed = data.armed ? "true" : "false";
+  }
+
+  function loadStatus() {
+    fetch("/api/reprocess/status")
+      .then((r) => r.json())
+      .then(renderStatus)
+      .catch(() => {
+        statusEl.textContent = "Could not load deep scan status.";
+      });
+  }
+
+  buttonEl.addEventListener("click", () => {
+    const endpoint = buttonEl.dataset.armed === "true" ? "/api/reprocess/disarm" : "/api/reprocess/arm";
+    fetch(endpoint, { method: "POST" })
+      .then((r) => r.json())
+      .then(loadStatus);
+  });
+
+  loadStatus();
+</script>
+{% endblock %}

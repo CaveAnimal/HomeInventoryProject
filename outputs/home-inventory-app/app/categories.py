@@ -15,3 +15,26 @@ HOUSEHOLD_CATEGORIES = [
     "Donate / Sell",
     "Unknown / Needs Review",
 ]
+
+STANDARD_ROOMS = [
+    "Kitchen",
+    "Living Room",
+    "Dining Room",
+    "Family Room",
+    "Office",
+    "Master Bedroom",
+    "Bedroom 1",
+    "Bedroom 2",
+    "Bedroom 3",
+    "Bathroom 1",
+    "Bathroom 2",
+    "Laundry Room",
+    "Hallway",
+    "Closet",
+    "Garage",
+    "Basement",
+    "Attic",
+    "Storage Room",
+    "Utility Room",
+    "Shed",
+]

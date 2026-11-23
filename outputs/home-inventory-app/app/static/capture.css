@@ -170,3 +170,86 @@
   margin: 0.3rem 0;
   font-size: 1rem;
 }
+
+.loc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.loc-grid label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.loc-grid label:first-child { grid-column: 1 / -1; }
+.loc-grid input {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 16px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.item-edit-list { display: grid; gap: 10px; }
+.item-edit-row { display: grid; gap: 4px; }
+.item-edit-fields { display: flex; gap: 6px; align-items: center; }
+.item-edit-name {
+  flex: 1;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 16px;
+}
+.item-edit-qty {
+  width: 58px;
+  padding: 10px 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 16px;
+  text-align: center;
+}
+.item-edit-save, .item-edit-del {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 14px;
+  cursor: pointer;
+}
+.item-edit-del { color: var(--accent-2); }
+.item-edit-meta { color: var(--muted); font-size: 12px; }
+.item-add-row { display: flex; gap: 6px; align-items: center; }
+.item-add-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 16px;
+}
+.item-add-row input[type="number"] {
+  width: 58px;
+  padding: 10px 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 16px;
+  text-align: center;
+}
+.item-add-row .capture-secondary { width: auto; padding: 10px 16px; }
+
+#newRoom, #newRoomCustom, .loc-grid select, #locRoomCustom {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 16px;
+}
+.loc-grid label select, .loc-grid label input#locRoomCustom { margin-top: 4px; }

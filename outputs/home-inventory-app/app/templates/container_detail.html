@@ -34,7 +34,19 @@
     <form class="panel ajax-json" data-method="PATCH" data-url="/api/boxes/{{ box.id }}/location">
       <h2>Location</h2>
       <div class="form-row">
-        <label>Room <input name="room_name" value="{{ box.room_name }}"></label>
+        <label>Room
+          <select name="room_name" data-room-select>
+            {% if not box.room_name or box.room_name == "unassigned" %}
+            <option value="unassigned" selected>— choose room —</option>
+            {% elif box.room_name not in room_options %}
+            <option value="{{ box.room_name }}" selected>{{ box.room_name }}</option>
+            {% endif %}
+            {% for room in room_options %}
+            <option value="{{ room }}" {% if room == box.room_name %}selected{% endif %}>{{ room }}</option>
+            {% endfor %}
+            <option value="__custom__">Custom room…</option>
+          </select>
+        </label>
         <label>North ft <input name="north_ft" type="number" step="0.1" value="{{ box.north_ft }}"></label>
         <label>East ft <input name="east_ft" type="number" step="0.1" value="{{ box.east_ft }}"></label>
         <label>Elevation ft <input name="elevation_ft" type="number" step="0.1" value="{{ box.elevation_ft }}"></label>
@@ -42,7 +54,10 @@
       <button>Save location</button>
     </form>
     <section class="panel">
-      <h2>Items</h2>
+      <div class="section-heading">
+        <h2>Items</h2>
+        <button type="button" class="button secondary" data-estimate-all-costs {% if not cost_lookup_enabled %}disabled title="Cost lookup is disabled (COST_LOOKUP_PROVIDER)"{% endif %}>Estimate all costs</button>
+      </div>
       <form class="inline-add" data-add-item>
         <input name="item_name" required placeholder="Add item manually">
         <input name="quantity" type="number" min="1" value="1" aria-label="Quantity">
@@ -55,21 +70,50 @@
       </form>
       <div class="item-table">
         {% for item in box["items"] %}
-        <div class="item-row" data-item-id="{{ item.id }}">
-          <input name="item_name" value="{{ item.item_name }}">
-          <input name="quantity" type="number" value="{{ item.quantity }}">
-          <select name="status"><option {% if item.status == "confirmed" %}selected{% endif %}>confirmed</option><option {% if item.status == "likely" %}selected{% endif %}>likely</option></select>
-          <select name="category">
-            <option value="">{{ item.category or "Category..." }}</option>
-            {% for cat in categories %}<option {% if item.category == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
-          </select>
-          <input name="tags" value="{{ item.tags }}" placeholder="tags">
-          <button data-save-item>Save</button>
-          <button data-delete-item>Delete</button>
-          <select data-move-target>
-            <option value="">Move to...</option>
-            {% for other in boxes %}{% if other.id != box.id %}<option value="{{ other.id }}">{{ other.path or other.name }}</option>{% endif %}{% endfor %}
-          </select>
+        <div class="item-block">
+          <div class="item-row" data-item-id="{{ item.id }}">
+            <input name="item_name" value="{{ item.item_name }}">
+            <input name="quantity" type="number" value="{{ item.quantity }}">
+            <select name="status"><option {% if item.status == "confirmed" %}selected{% endif %}>confirmed</option><option {% if item.status == "likely" %}selected{% endif %}>likely</option></select>
+            <select name="category">
+              <option value="">{{ item.category or "Category..." }}</option>
+              {% for cat in categories %}<option {% if item.category == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
+            </select>
+            <input name="tags" value="{{ item.tags }}" placeholder="tags">
+            <button data-save-item>Save</button>
+            <button data-delete-item>Delete</button>
+            <select data-move-target>
+              <option value="">Move to...</option>
+              {% for other in boxes %}{% if other.id != box.id %}<option value="{{ other.id }}">{{ other.path or other.name }}</option>{% endif %}{% endfor %}
+            </select>
+          </div>
+          <div class="cost-estimate-row">
+            {% if item.latest_cost_estimate %}
+            <span class="cost-estimate-value">
+              {% if item.latest_cost_estimate.estimated_cost_usd is not none %}
+              <strong>${{ "%.2f"|format(item.latest_cost_estimate.estimated_cost_usd) }}</strong>
+              {%- set est_qty = item.latest_cost_estimate.quantity or 1 %}
+              {%- if est_qty > 1 %}
+              × {{ est_qty }} = <strong>${{ "%.2f"|format(item.latest_cost_estimate.estimated_cost_usd * est_qty) }}</strong>
+              {%- endif %} ·
+              {{ "%.0f"|format(item.latest_cost_estimate.confidence * 100) }}% confidence ·
+              {% if item.latest_cost_estimate.source_url %}
+              <a href="{{ item.latest_cost_estimate.source_url }}" target="_blank" rel="noopener noreferrer">{{ item.latest_cost_estimate.source_title or "source" }}</a> ·
+              {% endif %}
+              <span class="cost-estimate-age">as of {{ item.latest_cost_estimate.created_at }}</span>
+              {% endif %}
+            </span>
+            {% endif %}
+            {% if not cost_lookup_enabled %}
+            <span class="cost-disabled">Cost estimates disabled (COST_LOOKUP_PROVIDER)</span>
+            {% elif item.cost_lookup_excluded_category %}
+            <span class="cost-disabled">Not available: "{{ item.category }}" is excluded for privacy</span>
+            {% elif item.cost_lookup_opted_out %}
+            <span class="cost-disabled">Cost lookup turned off for this item (tag: no-cost-lookup)</span>
+            {% else %}
+            <button type="button" class="button secondary" data-estimate-cost data-item-id="{{ item.id }}">Estimate cost</button>
+            {% endif %}
+          </div>
         </div>
         {% else %}
         <p>No confirmed items yet.</p>
@@ -87,6 +131,7 @@
             {{ "%.0f"|format(suggestion.confidence * 100) }}% ·
             {{ suggestion.category or "uncategorized" }}
             {% if suggestion.notes %}· {{ suggestion.notes }}{% endif %}
+            {% if suggestion.pass_type == "reprocess" %}· <span class="badge">deep scan{% if suggestion.source_model %} ({{ suggestion.source_model }}){% endif %}</span>{% endif %}
           </span>
           <button data-confirm-suggestion>Confirm</button>
           <button data-dismiss-suggestion>Dismiss</button>
