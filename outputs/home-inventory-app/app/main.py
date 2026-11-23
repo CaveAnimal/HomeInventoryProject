@@ -18,9 +18,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .categories import HOUSEHOLD_CATEGORIES
+from .categories import HOUSEHOLD_CATEGORIES, STANDARD_ROOMS
 from .database import connect, migrate
 from .repository import (
+    add_cost_estimate,
     add_detection,
     add_item_to_box,
     add_photo,
@@ -29,23 +30,60 @@ from .repository import (
     delete_box_item,
     dismiss_detection,
     get_box,
+    get_box_item,
+    get_setting,
+    latest_cost_estimate,
     list_boxes,
+    list_cost_estimates_for_item,
+    list_photos_pending_deep_scan,
     move_box_item,
     normalize,
     record_history,
     resolve_merged_detections,
     rows,
+    set_setting,
     update_box,
     update_box_item,
     update_box_location,
 )
+from . import scheduler
+from .scheduler import ARMED_KEY, DEEP_SCAN_HOUR, LAST_RUN_KEY
+from .services.cost_lookup import (
+    EXCLUDED_CATEGORIES,
+    CostLookupError,
+    ensure_budget_available,
+    estimate_replacement_cost,
+)
 from .services.labels import generate_qr
 from .services.search import search_items, similar_items
-from .services.vision import VisionError, get_provider
-from .settings import APP_NAME, DATA_DIR, IMPORT_DIR, IMPORT_EXTENSIONS, LABEL_DIR, PHOTO_DIR, ensure_dirs
+from .services.vision import VisionError, bonsai_base_url, bonsai_vision_model, get_provider
+from .settings import APP_NAME, DATA_DIR, IMPORT_DIR, IMPORT_EXTENSIONS, LABEL_DIR, PHOTO_DIR, ensure_dirs, reprocess_vision_model
+
+# Vision providers that actually call a model. The alternative is the offline
+# "heuristic" provider, which these endpoints deliberately refuse so a silent
+# downgrade never looks like a real detection pass. "bonsai" (the default)
+# is the local Bonsai llama.cpp server; "lmstudio" is the same
+# OpenAI-compatible client pointed at LM Studio.
+LLM_VISION_PROVIDERS = {"bonsai", "ollama", "lmstudio"}
+
+
+def _not_an_llm_provider_message(provider_name: str) -> str:
+    expected = ", ".join(sorted(LLM_VISION_PROVIDERS))
+    return f"LLM vision not used: VISION_PROVIDER is '{provider_name}', expected one of: {expected}."
+
+
+def _active_vision_model(provider_name: str) -> str:
+    """Report the model of whichever provider is configured, for response meta."""
+    if provider_name == "bonsai":
+        return bonsai_vision_model()
+    if provider_name == "lmstudio":
+        return os.environ.get("LMSTUDIO_VISION_MODEL", "qwen3.8-27b")
+    return os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct")
+
 
 migrate()
 ensure_dirs()
+scheduler.start()
 
 app = FastAPI(title=APP_NAME)
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
@@ -64,49 +102,102 @@ def db():
         conn.close()
 
 
-def ollama_status() -> dict:
-    provider = os.environ.get("VISION_PROVIDER", "heuristic").lower()
-    model = os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct")
+# COST LOOKUP UI/OPT-OUT HELPERS (T10-T13)
+# ==========================================
+# box_items has no dedicated cost-lookup opt-out column (schema changes are
+# disallowed -- see docs/AI_Planning/support/cost_of_replacement/DECISIONS.md).
+# Per-item opt-out instead reuses the existing free-text ``tags`` column
+# (comma-separated, same convention as add_item_to_box(..., tags="tools,cables"))
+# with a reserved tag: "no-cost-lookup". The endpoint layer (here) owns this
+# check and passes the resulting boolean into estimate_replacement_cost()'s
+# ``opt_out`` parameter; the service layer never reads ``tags`` itself.
+COST_LOOKUP_OPT_OUT_TAG = "no-cost-lookup"
+
+
+def item_opted_out_of_cost_lookup(tags: str) -> bool:
+    return COST_LOOKUP_OPT_OUT_TAG in {value.strip().lower() for value in (tags or "").split(",")}
+
+
+def cost_lookup_enabled() -> bool:
+    """Live-read COST_LOOKUP_PROVIDER rather than trusting settings.py's cached constant.
+
+    settings.py computes COST_LOOKUP_PROVIDER once at import time; in a
+    process where the module was already imported before a test/operator
+    sets the env var, that cached value would be stale. services/cost_lookup.py's
+    own get_cost_provider() has the identical issue and already works around
+    it by reading os.environ directly instead of settings.COST_LOOKUP_PROVIDER
+    (see cost_lookup.py); this mirrors that same pattern for the UI check.
+    """
+    return os.environ.get("COST_LOOKUP_PROVIDER", "disabled").lower() != "disabled"
+
+
+def attach_cost_lookup_info(conn, box: dict) -> dict:
+    """Annotate each item in ``box["items"]`` with cost-lookup display state (T13)."""
+    for item in box.get("items", []):
+        item["latest_cost_estimate"] = latest_cost_estimate(conn, item["id"])
+        item["cost_lookup_opted_out"] = item_opted_out_of_cost_lookup(item.get("tags") or "")
+        item["cost_lookup_excluded_category"] = (item.get("category") or "") in EXCLUDED_CATEGORIES
+    return box
+
+
+def _bonsai_ready() -> bool:
+    try:
+        response = requests.get(f"{bonsai_base_url()}/v1/models", timeout=2)
+        response.raise_for_status()
+        return bool(response.json().get("data"))
+    except Exception:
+        return False
+
+
+def _ollama_ready(requested: str) -> bool:
     generate_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
     base_url = generate_url.split("/api/", 1)[0].rstrip("/")
-
-    status = {
-        "provider": provider,
-        "model": model,
-        "base_url": base_url,
-        "running": False,
-        "model_available": False,
-        "error": "",
-    }
-    if provider != "ollama":
-        status["error"] = "VISION_PROVIDER is not set to ollama"
-        return status
-
     try:
         response = requests.get(f"{base_url}/api/tags", timeout=2)
         response.raise_for_status()
         models = response.json().get("models", [])
         names = {(entry.get("name") or "").strip() for entry in models if isinstance(entry, dict)}
-        requested = model.strip()
-        requested_base = requested.split(":", 1)[0]
-        status["running"] = True
-        status["model_available"] = requested in names or any(name.split(":", 1)[0] == requested_base for name in names)
-    except requests.exceptions.RequestException as exc:
-        status["error"] = f"{type(exc).__name__}: {exc}"
-    except Exception as exc:
-        status["error"] = f"{type(exc).__name__}: {exc}"
-    return status
+    except Exception:
+        return False
+    requested = requested.strip()
+    requested_base = requested.split(":", 1)[0]
+    return requested in names or any(name.split(":", 1)[0] == requested_base for name in names)
+
+
+def llm_status() -> dict:
+    """Dashboard readiness for the vision model and the cost-extraction model."""
+    vision_provider = os.environ.get("VISION_PROVIDER", "bonsai").lower()
+    vision_model = _active_vision_model(vision_provider)
+    if vision_provider == "ollama":
+        vision_ready = _ollama_ready(vision_model)
+    elif vision_provider == "bonsai":
+        vision_ready = _bonsai_ready()
+    else:
+        vision_ready = False
+
+    if os.environ.get("COST_LOOKUP_LLM", "bonsai").lower() == "ollama":
+        cost_model = os.environ.get("COST_LOOKUP_OLLAMA_MODEL", "llama3.2")
+        cost_ready = _ollama_ready(cost_model)
+    else:
+        cost_model = bonsai_vision_model()
+        cost_ready = vision_ready if vision_provider == "bonsai" else _bonsai_ready()
+
+    return {
+        "vision_model": vision_model,
+        "vision_ready": vision_ready,
+        "cost_model": cost_model,
+        "cost_ready": cost_ready,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, conn=Depends(db)):
     boxes = list_boxes(conn)
     rooms = rows(conn.execute("SELECT room_name, COUNT(*) AS count FROM box_locations GROUP BY room_name ORDER BY room_name"))
-    recent = rows(conn.execute("SELECT * FROM edit_history ORDER BY created_at DESC LIMIT 8"))
     # Build an external URL that a phone on the same LAN can use.
     # Host/port can be overridden with env vars HOME_INVENTORY_HOST and HOME_INVENTORY_PORT.
     host_env = os.environ.get("HOME_INVENTORY_HOST", "127.0.0.1")
-    port_env = os.environ.get("HOME_INVENTORY_PORT", "8000")
+    port_env = os.environ.get("HOME_INVENTORY_PORT", "1800")
     display_host = host_env
     if host_env in ("0.0.0.0", "::", ""):
         # detect a likely local LAN IP without sending traffic
@@ -117,11 +208,10 @@ def dashboard(request: Request, conn=Depends(db)):
         except Exception:
             display_host = "127.0.0.1"
     external_url = f"http://{display_host}:{port_env}"
-    llm_status = ollama_status()
 
     return templates.TemplateResponse(
         "dashboard.html",
-        {"request": request, "boxes": boxes, "rooms": rooms, "recent": recent, "external_url": external_url, "llm_status": llm_status},
+        {"request": request, "boxes": boxes, "rooms": rooms, "external_url": external_url, "llm_status": llm_status()},
     )
 
 
@@ -132,7 +222,10 @@ def boxes_page(request: Request, conn=Depends(db)):
 
 @app.get("/boxes/new", response_class=HTMLResponse)
 def new_box_page(request: Request, conn=Depends(db)):
-    return templates.TemplateResponse("new_box.html", {"request": request, "containers": list_boxes(conn)})
+    return templates.TemplateResponse(
+        "new_box.html",
+        {"request": request, "containers": list_boxes(conn), "room_options": room_options(conn)},
+    )
 
 
 @app.get("/box/{public_id}", response_class=HTMLResponse)
@@ -140,8 +233,20 @@ def public_box_page(public_id: str, request: Request, conn=Depends(db)):
     box = get_box(conn, public_id=public_id)
     if not box:
         raise HTTPException(404, "Container not found")
+    attach_cost_lookup_info(conn, box)
     all_boxes = list_boxes(conn)
-    return templates.TemplateResponse("container_detail.html", {"request": request, "box": box, "boxes": all_boxes, "mobile": True, "categories": HOUSEHOLD_CATEGORIES})
+    return templates.TemplateResponse(
+        "container_detail.html",
+        {
+            "request": request,
+            "box": box,
+            "boxes": all_boxes,
+            "mobile": True,
+            "categories": HOUSEHOLD_CATEGORIES,
+            "room_options": room_options(conn),
+            "cost_lookup_enabled": cost_lookup_enabled(),
+        },
+    )
 
 
 @app.get("/boxes/{box_id}", response_class=HTMLResponse)
@@ -149,12 +254,39 @@ def box_detail_page(box_id: int, request: Request, conn=Depends(db)):
     box = get_box(conn, box_id=box_id)
     if not box:
         raise HTTPException(404, "Container not found")
-    return templates.TemplateResponse("container_detail.html", {"request": request, "box": box, "boxes": list_boxes(conn), "mobile": False, "categories": HOUSEHOLD_CATEGORIES})
+    attach_cost_lookup_info(conn, box)
+    return templates.TemplateResponse(
+        "container_detail.html",
+        {
+            "request": request,
+            "box": box,
+            "boxes": list_boxes(conn),
+            "mobile": False,
+            "categories": HOUSEHOLD_CATEGORIES,
+            "room_options": room_options(conn),
+            "cost_lookup_enabled": cost_lookup_enabled(),
+        },
+    )
+
+
+def room_options(conn) -> list[str]:
+    """STANDARD_ROOMS plus any room names already used, deduped case-insensitively."""
+    options = list(STANDARD_ROOMS)
+    seen = {name.lower() for name in options}
+    for entry in rows(conn.execute("SELECT DISTINCT room_name FROM box_locations ORDER BY room_name")):
+        name = (entry["room_name"] or "").strip()
+        if name and name.lower() not in seen and name.lower() != "unassigned":
+            options.append(name)
+            seen.add(name.lower())
+    return options
 
 
 @app.get("/capture", response_class=HTMLResponse)
 def capture_page(request: Request, conn=Depends(db)):
-    return templates.TemplateResponse("capture.html", {"request": request, "container": None, "containers": list_boxes(conn)})
+    return templates.TemplateResponse(
+        "capture.html",
+        {"request": request, "container": None, "containers": list_boxes(conn), "room_options": room_options(conn)},
+    )
 
 
 @app.get("/capture/{public_id}", response_class=HTMLResponse)
@@ -162,7 +294,11 @@ def capture_container_page(public_id: str, request: Request, conn=Depends(db)):
     container = get_box(conn, public_id=public_id)
     if not container:
         raise HTTPException(404, "Container not found")
-    return templates.TemplateResponse("capture.html", {"request": request, "container": container, "containers": []})
+    attach_cost_lookup_info(conn, container)
+    return templates.TemplateResponse(
+        "capture.html",
+        {"request": request, "container": container, "containers": [], "room_options": room_options(conn)},
+    )
 
 
 @app.get("/search", response_class=HTMLResponse)
@@ -174,6 +310,11 @@ def search_page(request: Request, q: str = "", room: str = "", tag: str = "", ca
         "search.html",
         {"request": request, "q": q, "room": room, "tag": tag, "category": category, "min_confidence": min_confidence, "results": results, "rooms": rooms, "similar": similar, "categories": HOUSEHOLD_CATEGORIES},
     )
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page(request: Request):
+    return templates.TemplateResponse("admin.html", {"request": request})
 
 
 @app.get("/labels", response_class=HTMLResponse)
@@ -329,7 +470,10 @@ async def api_import(request: Request, conn=Depends(db)):
             vision_error = str(exc)
             continue
         for item in detected:
-            suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
+            suggestion_id = add_detection(
+                conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes,
+                source_model=_active_vision_model(os.environ.get("VISION_PROVIDER", "bonsai").lower()), pass_type="live",
+            )
             suggestions.append(
                 {
                     "id": suggestion_id,
@@ -392,9 +536,9 @@ async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) ->
     user-safe error message is returned instead of raising, so the API
     response stays actionable and no data is corrupted.
     """
-    provider_name = os.environ.get("VISION_PROVIDER", "ollama").lower()
-    if provider_name != "ollama":
-        return [], f"LLM vision not used: VISION_PROVIDER is '{provider_name}', expected 'ollama'."
+    provider_name = os.environ.get("VISION_PROVIDER", "bonsai").lower()
+    if provider_name not in LLM_VISION_PROVIDERS:
+        return [], _not_an_llm_provider_message(provider_name)
     provider = get_provider()
     suggestions: list[dict] = []
     vision_error: str | None = None
@@ -415,7 +559,10 @@ async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) ->
             continue
         duration_ms = int((time.perf_counter() - t0) * 1000)
         for item in detected:
-            suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
+            suggestion_id = add_detection(
+                conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes,
+                source_model=_active_vision_model(os.environ.get("VISION_PROVIDER", "bonsai").lower()), pass_type="live",
+            )
             suggestions.append(
                 {
                     "id": suggestion_id,
@@ -426,7 +573,7 @@ async def save_photos_and_detect(conn, box_id: int, photos: list[UploadFile]) ->
                     "notes": item.notes,
                     "provider": provider_name,
                     "llm_used": True,
-                    "model": os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct"),
+                    "model": _active_vision_model(provider_name),
                     "duration_ms": duration_ms,
                 }
             )
@@ -452,15 +599,15 @@ def detect_existing_photo(conn, box_id: int, photo_id: int) -> tuple[list[dict],
         (photo_id,),
     )
 
-    provider_name = os.environ.get("VISION_PROVIDER", "ollama").lower()
+    provider_name = os.environ.get("VISION_PROVIDER", "bonsai").lower()
     meta = {
         "provider": provider_name,
         "llm_used": False,
-        "model": os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct"),
+        "model": _active_vision_model(provider_name),
         "duration_ms": 0,
     }
-    if provider_name != "ollama":
-        return [], f"LLM vision not used: VISION_PROVIDER is '{provider_name}', expected 'ollama'.", meta
+    if provider_name not in LLM_VISION_PROVIDERS:
+        return [], _not_an_llm_provider_message(provider_name), meta
 
     provider = get_provider()
     suggestions: list[dict] = []
@@ -476,7 +623,10 @@ def detect_existing_photo(conn, box_id: int, photo_id: int) -> tuple[list[dict],
     meta["llm_used"] = True
 
     for item in detected:
-        suggestion_id = add_detection(conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes)
+        suggestion_id = add_detection(
+            conn, box_id, photo_id, item.name, item.confidence, item.quantity, item.category, item.notes,
+            source_model=meta["model"], pass_type="live",
+        )
         suggestions.append(
             {
                 "id": suggestion_id,
@@ -517,6 +667,39 @@ def api_reprocess_photo(box_id: int, photo_id: int, conn=Depends(db)):
         "model": meta["model"],
         "duration_ms": meta["duration_ms"],
     }
+
+
+@app.get("/api/reprocess/status")
+def api_reprocess_status(conn=Depends(db)):
+    """Status for the nightly deep-scan pass (app/nightly_reprocess.py + app/scheduler.py).
+
+    Reports how many stored photos have not yet been reprocessed by the
+    current deep-scan model label, whether a one-shot scan is armed
+    for the next nightly window, and when it last ran -- everything the
+    admin page needs without triggering anything itself.
+    """
+    model = reprocess_vision_model()
+    pending = list_photos_pending_deep_scan(conn, model)
+    return {
+        "model": model,
+        "pending_count": len(pending),
+        "armed": get_setting(conn, ARMED_KEY, "false") == "true",
+        "scheduled_hour": DEEP_SCAN_HOUR,
+        "last_run_date": get_setting(conn, LAST_RUN_KEY, "") or None,
+    }
+
+
+@app.post("/api/reprocess/arm")
+def api_reprocess_arm(conn=Depends(db)):
+    """Arm a one-shot deep scan: runs once during the next nightly window, then disarms itself."""
+    set_setting(conn, ARMED_KEY, "true")
+    return {"armed": True}
+
+
+@app.post("/api/reprocess/disarm")
+def api_reprocess_disarm(conn=Depends(db)):
+    set_setting(conn, ARMED_KEY, "false")
+    return {"armed": False}
 
 
 @app.patch("/api/boxes/{box_id}")
@@ -627,6 +810,112 @@ async def api_merge_items(request: Request, conn=Depends(db)):
     delete_box_item(conn, source_id)
     record_history(conn, "box_item", target_id, "merged", after={"source_item_id": source_id})
     return {"ok": True}
+
+
+@app.post("/api/items/{item_id}/cost-estimate")
+def api_estimate_item_cost(item_id: int, conn=Depends(db)):
+    """T10: single-item estimated-replacement-cost lookup.
+
+    Runs the category-exclusion, per-item opt-out, and monthly-budget guards
+    (via estimate_replacement_cost()) before any network call. Never bypasses
+    that entry point to call the provider directly. Never touches item_name/
+    category/quantity as a side effect (GOAL.md non-negotiable). On any
+    CostLookupError (including the disabled-provider case, D-005) this
+    returns a clean JSON error, never a 500.
+    """
+    item = get_box_item(conn, item_id)
+    if not item:
+        raise HTTPException(404, "Item not found")
+    opt_out = item_opted_out_of_cost_lookup(item.get("tags") or "")
+    try:
+        estimate = estimate_replacement_cost(conn, item["item_name"], item.get("category") or "", opt_out=opt_out)
+    except CostLookupError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    add_cost_estimate(
+        conn,
+        item_id,
+        estimate.estimated_cost_usd,
+        estimate.confidence,
+        estimate.source_title,
+        estimate.source_url,
+        quantity=int(item.get("quantity") or 1),
+    )
+    return latest_cost_estimate(conn, item_id)
+
+
+@app.post("/api/boxes/{box_id}/cost-estimates")
+def api_estimate_box_costs(box_id: int, conn=Depends(db)):
+    """T11: batch "estimate all" for a container.
+
+    Fans out into N sequential single-item calls through
+    estimate_replacement_cost() (D-003: never one bulk provider request).
+    Partial success: each item lands in exactly one of estimated/skipped/
+    failed, and the whole batch never fails just because some items are
+    excluded, opted out, or hit the budget cap. Once the monthly budget cap
+    is hit mid-batch, every remaining item is reported skipped with that
+    reason rather than attempting (and failing) a lookup for it.
+    """
+    box = get_box(conn, box_id=box_id)
+    if not box:
+        raise HTTPException(404, "Container not found")
+
+    estimated: list[dict] = []
+    skipped: list[dict] = []
+    failed: list[dict] = []
+    budget_exhausted = False
+
+    for item in box["items"]:
+        summary = {"item_id": item["id"], "item_name": item["item_name"]}
+        if budget_exhausted:
+            skipped.append({**summary, "reason": "monthly budget reached"})
+            continue
+
+        opt_out = item_opted_out_of_cost_lookup(item.get("tags") or "")
+        category = item.get("category") or ""
+        if opt_out:
+            skipped.append({**summary, "reason": "opted out for this item (tag: no-cost-lookup)"})
+            continue
+        if category in EXCLUDED_CATEGORIES:
+            skipped.append({**summary, "reason": f'category "{category}" is excluded by default'})
+            continue
+
+        try:
+            ensure_budget_available(conn)
+        except CostLookupError:
+            budget_exhausted = True
+            skipped.append({**summary, "reason": "monthly budget reached"})
+            continue
+
+        try:
+            estimate = estimate_replacement_cost(conn, item["item_name"], category, opt_out=False)
+        except CostLookupError as exc:
+            failed.append({**summary, "error": str(exc)})
+            continue
+
+        add_cost_estimate(
+            conn,
+            item["id"],
+            estimate.estimated_cost_usd,
+            estimate.confidence,
+            estimate.source_title,
+            estimate.source_url,
+            quantity=int(item.get("quantity") or 1),
+        )
+        estimated.append({**summary, **latest_cost_estimate(conn, item["id"])})
+
+    return {"estimated": estimated, "skipped": skipped, "failed": failed}
+
+
+@app.get("/api/items/{item_id}/cost-estimates")
+def api_list_item_cost_estimates(item_id: int, conn=Depends(db)):
+    """T12: latest estimate + full history for one item."""
+    item = get_box_item(conn, item_id)
+    if not item:
+        raise HTTPException(404, "Item not found")
+    return {
+        "latest": latest_cost_estimate(conn, item_id),
+        "history": list_cost_estimates_for_item(conn, item_id),
+    }
 
 
 @app.get("/api/search")

@@ -188,6 +188,21 @@ em {
   padding: 10px 0;
   border-bottom: 1px solid var(--line);
 }
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: white;
+  font-size: 0.75rem;
+}
+.item-block { display: grid; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.item-block:last-child { border-bottom: 0; }
+.cost-estimate-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 0.85rem; }
+.cost-estimate-value { color: var(--muted); }
+.cost-estimate-value a { color: var(--accent); text-decoration: underline; }
+.cost-disabled { color: var(--muted); font-style: italic; }
+.cost-estimate-row button[data-estimate-cost] { min-height: 30px; padding: 4px 10px; font-size: 0.85rem; }
 .detail-side { display: grid; gap: 16px; }
 .qr { width: min(100%, 260px); display: block; margin: 0 auto 12px; }
 .photo-grid { grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); }

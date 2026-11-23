@@ -41,7 +41,15 @@
     </div>
     <label>Photos <input name="photos" type="file" accept="image/*" multiple></label>
     <div class="form-row">
-      <label>Room <input name="room_name" required placeholder="basement storage room"></label>
+      <label>Room
+        <select name="room_name" required data-room-select>
+          <option value="" disabled selected>— choose room —</option>
+          {% for room in room_options %}
+          <option value="{{ room }}">{{ room }}</option>
+          {% endfor %}
+          <option value="__custom__">Custom room…</option>
+        </select>
+      </label>
       <label>Size <input name="size" placeholder="medium tote"></label>
     </div>
     <div class="form-row thirds">

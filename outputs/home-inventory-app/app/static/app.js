@@ -5,6 +5,20 @@ const toast = (message) => {
   setTimeout(() => { el.hidden = true; }, 2400);
 };
 
+// Room dropdowns: choosing "Custom room…" swaps the select for a free-text
+// input with the same name, so form serialization keeps working.
+document.querySelectorAll("select[data-room-select]").forEach((select) => {
+  select.addEventListener("change", () => {
+    if (select.value !== "__custom__") return;
+    const input = document.createElement("input");
+    input.name = select.name;
+    input.placeholder = "Type room name";
+    if (select.required) input.required = true;
+    select.replaceWith(input);
+    input.focus();
+  });
+});
+
 const asJson = (form) => {
   const data = new FormData(form);
   const out = {};
@@ -160,5 +174,42 @@ if (boxDetail) {
     if (!confirm("Delete this container and all its contents? This cannot be undone.")) return;
     const res = await fetch(`/api/boxes/${boxId}`, { method: "DELETE" });
     if (res.ok) window.location.href = "/boxes"; else toast("Delete failed");
+  });
+
+  document.querySelectorAll("[data-estimate-cost]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = "Estimating...";
+      const itemId = button.dataset.itemId;
+      const res = await fetch(`/api/items/${itemId}/cost-estimate`, { method: "POST" });
+      if (res.ok) {
+        toast("Cost estimate added");
+        setTimeout(() => location.reload(), 700);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        toast(body.detail || "Cost estimate failed");
+        button.disabled = false;
+        button.textContent = original;
+      }
+    });
+  });
+
+  document.querySelector("[data-estimate-all-costs]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    if (button.disabled) return;
+    button.disabled = true;
+    const original = button.textContent;
+    button.textContent = "Estimating all...";
+    const res = await fetch(`/api/boxes/${boxId}/cost-estimates`, { method: "POST" });
+    if (res.ok) {
+      const json = await res.json();
+      toast(`Estimated ${json.estimated.length}, skipped ${json.skipped.length}, failed ${json.failed.length}`);
+      setTimeout(() => location.reload(), 900);
+    } else {
+      toast("Batch cost estimate failed");
+      button.disabled = false;
+      button.textContent = original;
+    }
   });
 }

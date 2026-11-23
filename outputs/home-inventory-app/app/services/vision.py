@@ -308,9 +308,9 @@ class HeuristicVisionProvider(VisionProvider):
 
 
 class OllamaVisionProvider(VisionProvider):
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         self.url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
-        self.model = os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct")
+        self.model = model or os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct")
 
     def _build_prompt(self) -> str:
         cats = ", ".join(f'"{c}"' for c in HOUSEHOLD_CATEGORIES)
@@ -386,10 +386,158 @@ class OllamaVisionProvider(VisionProvider):
         return [item for item in merged if item.confidence >= VISION_MIN_CONFIDENCE]
 
 
-def get_provider() -> VisionProvider:
-    provider = os.environ.get("VISION_PROVIDER", "ollama").lower()
+class LMStudioVisionProvider(VisionProvider):
+    """Vision provider backed by LM Studio's OpenAI-compatible local server.
+
+    EXPERIMENTAL (not yet wired into main.py's ``VISION_PROVIDER`` gate
+    checks) -- added to evaluate a larger tool-use-capable local model
+    against the existing Ollama vision path via scripts/vision_eval before
+    committing to it as a production option.
+    """
+
+    service_name = "LM Studio"
+
+    def __init__(self, model: str | None = None) -> None:
+        self.url = os.environ.get("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completions")
+        self.model = model or os.environ.get("LMSTUDIO_VISION_MODEL", "qwen3.8-27b")
+        # Reasoning models emit a hidden reasoning_content pass before the
+        # JSON answer; give it enough budget to think AND answer, or it gets
+        # truncated mid-thought (finish_reason "length" with empty content).
+        self.max_tokens = int(os.environ.get("LMSTUDIO_VISION_MAX_TOKENS", "1500"))
+
+    def _extra_payload(self) -> dict:
+        """Server-specific request fields merged into the chat-completions body."""
+        return {}
+
+    def _unreachable_message(self) -> str:
+        return (
+            "Could not reach the local LM Studio server. Make sure LM Studio's "
+            "local server is running, then try again."
+        )
+
+    def _model_missing_message(self) -> str:
+        return f"The LM Studio model '{self.model}' was not found. Load it in LM Studio first."
+
+    def _build_prompt(self) -> str:
+        cats = ", ".join(f'"{c}"' for c in HOUSEHOLD_CATEGORIES)
+        return (
+            "You are creating a conservative home inventory from one photo of an open storage container. "
+            "List ONLY clearly visible physical objects. Do not guess hidden/occluded items. "
+            "If uncertain, omit the item instead of guessing. "
+            "Use quantity > 1 only when multiple instances are clearly visible. "
+            f"category MUST be exactly one of: {cats}. "
+            "confidence is a number between 0 and 1. "
+            'Respond with ONLY this JSON, no prose, no markdown: '
+            '{"items":[{"name":"...","quantity":1,"confidence":0.0,"category":"...","notes":"..."}]}'
+        )
+
+    def _call_model(self, prompt: str, image_bytes: bytes) -> list[DetectedItem]:
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        try:
+            response = requests.post(
+                self.url,
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
+                            ],
+                        }
+                    ],
+                    "stream": False,
+                    "temperature": 0,
+                    "top_p": 0.1,
+                    "max_tokens": self.max_tokens,
+                    **self._extra_payload(),
+                },
+                timeout=180,
+            )
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError as exc:
+            raise VisionError(self._unreachable_message()) from exc
+        except requests.exceptions.Timeout as exc:
+            raise VisionError(
+                "The vision model took too long to respond. Try again with a smaller or clearer photo."
+            ) from exc
+        except requests.exceptions.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                raise VisionError(self._model_missing_message()) from exc
+            detail = getattr(getattr(exc, "response", None), "text", "") or str(exc)
+            raise VisionError(f"The vision service returned an error: {detail[:300]}") from exc
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise VisionError("The vision service returned an unreadable response. Try again.") from exc
+        choices = body.get("choices") or []
+        text = choices[0].get("message", {}).get("content", "") if choices else ""
+        return parse_detection_json(text, strict=True)
+
+    def detect(self, image_path: Path, original_name: str | None = None) -> list[DetectedItem]:
+        prompt = self._build_prompt()
+        overview = self._call_model(prompt, prepare_image_bytes(image_path))
+        return [item for item in overview if item.confidence >= VISION_MIN_CONFIDENCE]
+
+
+BONSAI_URL = "http://127.0.0.1:1080"
+BONSAI_VISION_MODEL = "bonsai2-27b"
+
+
+def bonsai_base_url() -> str:
+    return os.environ.get("BONSAI_URL", BONSAI_URL).rstrip("/")
+
+
+def bonsai_vision_model() -> str:
+    return os.environ.get("BONSAI_VISION_MODEL", BONSAI_VISION_MODEL)
+
+
+class BonsaiVisionProvider(LMStudioVisionProvider):
+    """Ternary-Bonsai-2-27B (a Qwen port) served by a local llama.cpp server.
+
+    llama-server exposes the same OpenAI chat-completions API as LM Studio,
+    so only the endpoint, model label and the thinking switch differ. The
+    server loads a single model and ignores the request's ``model`` field;
+    ``self.model`` is just the label recorded with each detection.
+
+    ``thinking`` controls the Qwen chat template's reasoning pass. Off (the
+    live-capture default) answers in ~7s; on, it takes ~25s but notices
+    more small items -- which is what the nightly deep scan wants.
+    """
+
+    service_name = "Bonsai"
+
+    def __init__(self, model: str | None = None, thinking: bool | None = None) -> None:
+        super().__init__(model=model or bonsai_vision_model())
+        self.url = f"{bonsai_base_url()}/v1/chat/completions"
+        if thinking is None:
+            thinking = os.environ.get("BONSAI_VISION_THINKING", "false").lower() == "true"
+        self.thinking = thinking
+        self.max_tokens = int(os.environ.get("BONSAI_VISION_MAX_TOKENS", "2000"))
+
+    def _extra_payload(self) -> dict:
+        return {"chat_template_kwargs": {"enable_thinking": self.thinking}}
+
+    def _unreachable_message(self) -> str:
+        return (
+            f"Could not reach the local Bonsai server at {bonsai_base_url()}. "
+            "Make sure Bonsai's llama-server is running, then try again."
+        )
+
+    def _model_missing_message(self) -> str:
+        return f"The Bonsai server at {bonsai_base_url()} has no model loaded."
+
+
+def get_provider(model: str | None = None, thinking: bool | None = None) -> VisionProvider:
+    provider = os.environ.get("VISION_PROVIDER", "bonsai").lower()
+    if provider == "bonsai":
+        return BonsaiVisionProvider(model=model, thinking=thinking)
     if provider == "ollama":
-        return OllamaVisionProvider()
+        return OllamaVisionProvider(model=model)
+    if provider == "lmstudio":
+        return LMStudioVisionProvider(model=model)
     if provider == "heuristic":
         return HeuristicVisionProvider()
     return HeuristicVisionProvider()
