@@ -2,3 +2,13 @@
 __pycache__/
 *.pyc
 outputs/home-inventory-app/test-data/*.sqlite3
+
+# Local runtime data: the live inventory database, photos, QR labels and
+# import inbox. Back these up separately; they are not source.
+outputs/home-inventory-app/data/
+# Old in-repo virtualenv (the app now runs from the root .venv).
+outputs/home-inventory-app/.venv312/
+# Files the test suite regenerates on every run.
+outputs/home-inventory-app/test-data/labels/
+outputs/home-inventory-app/test-data/photos/
+outputs/home-inventory-app/test-data/fake.jpg
