@@ -9,4 +9,5 @@ This folder holds larger ideas that may become separate projects or major workst
 - `insurance-evidence-and-backup/` - Treat photos as insurance evidence and create off-site backup workflows.
 - `item-categorization/` - Use practical household categories with optional mapping to public classification standards.
 - `iphone-lan-access/` - Step-by-step runbook to run the app on LAN and open it from iPhone.
+- `summary/` - Whole-application review: executive summary, technical details, and a roadmap toward a home-inventory service business.
 
