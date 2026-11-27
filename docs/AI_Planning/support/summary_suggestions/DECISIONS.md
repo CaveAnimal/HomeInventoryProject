@@ -283,5 +283,6 @@ Filled in as spikes run and decisions meet reality.
 |---|---|---|---|
 | 2026-11-26 | PD-16 assumptions 1, 2, 4 | QW-6 run: task account `jpful` finds `age.exe` (winget link on its PATH) and owns the OneDrive folder; file is 46.9 MB | ✅ (scheduled run still to confirm, BL-008) |
 | 2026-11-26 | PD-16 assumption 3 | Restore in a clean folder with a throwaway key: integrity ok, counts match, 11/11 photos. Not yet on a second computer with the real key | ⬜ partly (BL-008) |
+| 2026-11-27 | PD-16 assumption 3 | Real key copied to USB (F:, HomeInventoryRecovery, with portable age.exe and Recovery Sheet); the USB key decrypted the real OneDrive file 20261123-152641.tar.age on this PC: integrity ok, 9 containers, 56 items, 9 photo records. Second-computer restore still open | ⬜ nearly (BL-008) |
 | 2026-11-26 | SP-1 (item → photo backfill) | 48/56 items match exactly one photo via a confirmed detection; 8/56 have no matching detection but their container has exactly one photo; 0 ambiguous. **Rule for WS-2/WS-7:** link via the confirmed detection's photo; else, if the container has exactly one photo, link to it marked "inferred"; else leave unlinked | Answered |
 | 2026-11-26 | All §0 statuses | Owner review of DECISIONS.md | ACCEPTED rows in effect; PD-3, PD-4, PD-7, PD-12, PD-14 remain PROPOSED pending their spikes or phases |
