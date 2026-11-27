@@ -12,3 +12,6 @@ outputs/home-inventory-app/.venv312/
 outputs/home-inventory-app/test-data/labels/
 outputs/home-inventory-app/test-data/photos/
 outputs/home-inventory-app/test-data/fake.jpg
+
+# age private keys for backups (QW-6). Never commit: they decrypt every backup.
+*.agekey
