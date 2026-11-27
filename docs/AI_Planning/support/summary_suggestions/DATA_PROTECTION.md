@@ -123,7 +123,8 @@ One engine handles both tiers: two repositories (USB + off-site), one password, 
 ## 7. What This Means for the Owner's Own Install Today
 
 - Copy 1: `E:` (WD_BLACK HDD). Copy 2: `D:\HomeInventoryBackups` (WD Elements external HDD), weekly via `backup-data.ps1`. That is **two devices, but the same media type (HDD), unencrypted, and no off-site copy**.
-- WS-0 **QW-6** (off-site copy) should use the **same engine as PD-12** once SP-9 confirms it, so the owner's setup is the first real test of the customer design.
+- WS-0 **QW-6** (off-site copy) comes first (owner decision, 2026-11-26). It encrypts each snapshot with **age** (public key on the PC, private key kept off it) and writes it to the owner's **OneDrive**-synced folder (PD-16). WS-10 later moves the owner onto the PD-12 engine, so the owner's setup is still the first real test of the customer design.
+- **Customers are not tied to OneDrive.** The owner's destination is a personal choice. Customers pick their own off-site destination from the Tier 2 options in §3 during first-run setup.
 
 ---
 

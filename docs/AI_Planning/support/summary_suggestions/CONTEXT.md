@@ -2,7 +2,7 @@
 
 > AI AGENT INSTRUCTIONS: This document describes the system the summary_suggestions program changes, as it actually is on 2026-11-26, and what each workstream changes. Pillar 2 of GOAL → CONTEXT → DECISIONS → TODO. Goals and scope live in [GOALS.md](GOALS.md) (APPROVED 2026-11-26). If a change is outside this context or contradicts it, stop and ask; don't improvise.
 
-- **Status:** DRAFT, awaiting owner review.
+- **Status:** **APPROVED** by owner on 2026-11-26 (with DECISIONS.md).
 - **Verified against:** the code on branch `docs/summary-suggestions-plan` (same app code as `main` at `c35d181`), the live database (read-only), and a test run, all on 2026-11-26.
 - **Paths below** are relative to `outputs/home-inventory-app/` unless they start with the repository root.
 
