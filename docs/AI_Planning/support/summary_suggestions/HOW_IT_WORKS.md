@@ -92,7 +92,7 @@ All review questions are answered (GOALS.md §8). On 2026-11-26 the owner kept b
 | [USER_OWNED_ORIGINALS.md](USER_OWNED_ORIGINALS.md) | PROPOSED, pending SP-10 | Decision analysis for PD-13 / PD-14 / PD-15, with workflow diagram |
 | [CONTEXT.md](CONTEXT.md) | **APPROVED** 2026-11-26 | Current system (from summary §3) and target state per workstream (pillar 2) |
 | [DECISIONS.md](DECISIONS.md) | **APPROVED** 2026-11-26 | Seeded with PD-1…PD-15, references to inherited D-numbers, and the §8 scope changes (pillar 3) |
-| `TODO.md` | To create | Phase 0 (including SP-7, SP-9 and SP-10), then full detail for WS-0 and WS-1 only (pillar 4) |
+| [TODO.md](TODO.md) | **APPROVED** 2026-11-26 | Phase 0 (including SP-7, SP-9 and SP-10), then full detail for WS-0 and WS-1 only (pillar 4) |
 | `SPRINT_STORY_summary_suggestions.md` | To create | Jira-ready stories derived from TODO.md, one per task |
 
 Create them in the order listed, each reviewed by the owner before the next one starts, as the playbook requires.
