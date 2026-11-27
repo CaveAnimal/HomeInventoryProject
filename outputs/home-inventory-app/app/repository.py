@@ -438,6 +438,26 @@ def count_cost_estimates_this_month(conn: sqlite3.Connection) -> int:
     return int(found["n"]) if found else 0
 
 
+def record_cost_lookup_attempt(conn: sqlite3.Connection) -> None:
+    """Record one outbound cost-lookup attempt (QW-5), whatever its outcome."""
+    conn.execute("INSERT INTO cost_lookup_attempts DEFAULT VALUES")
+
+
+def count_cost_lookup_attempts_this_month(conn: sqlite3.Connection) -> int:
+    """Outbound lookup attempts (successes and failures) in the current UTC month.
+
+    This is what the monthly budget guard counts (QW-5). Migration 008 copied
+    earlier estimates in as attempts, so the count is continuous across the upgrade.
+    """
+    found = row(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM cost_lookup_attempts "
+            "WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')"
+        )
+    )
+    return int(found["n"]) if found else 0
+
+
 def get_setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
     found = row(conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)))
     return found["value"] if found else default
@@ -460,3 +480,285 @@ def normalize(value: str) -> str:
 def normalize_container_type(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", (value or "box").lower()).strip("_")
     return normalized or "box"
+
+
+
+# ---------------------------------------------------------------------------
+# WS-1: lifecycle status, loans and verification (PD-1, PD-2)
+# ---------------------------------------------------------------------------
+
+LIFECYCLE_STATUSES = (
+    "in_home",
+    "loaned",
+    "in_repair",
+    "in_vehicle",
+    "in_storage_offsite",
+    "donated",
+    "sold",
+    "given_away",
+    "discarded",
+    "missing",
+)
+LIFECYCLE_LABELS = {
+    "in_home": "In home",
+    "loaned": "Loaned",
+    "in_repair": "In repair",
+    "in_vehicle": "In vehicle",
+    "in_storage_offsite": "In off-site storage",
+    "donated": "Donated",
+    "sold": "Sold",
+    "given_away": "Given away",
+    "discarded": "Discarded",
+    "missing": "Missing",
+}
+# Statuses meaning the item has left the household for good.
+GONE_STATUSES = ("donated", "sold", "given_away", "discarded")
+# Statuses meaning the item still belongs to the household but isn't in the house.
+OUT_OF_HOUSE_STATUSES = ("loaned", "in_repair", "in_vehicle", "in_storage_offsite")
+
+
+class LifecycleError(ValueError):
+    """A status or loan change that isn't allowed. The message is safe to show."""
+
+
+def _today() -> str:
+    from datetime import date
+
+    return date.today().isoformat()
+
+
+def get_open_loan(conn: sqlite3.Connection, item_id: int) -> dict[str, Any] | None:
+    return row(conn.execute("SELECT * FROM loans WHERE box_item_id = ? AND returned_at IS NULL", (item_id,)))
+
+
+def set_lifecycle_status(conn: sqlite3.Connection, item_id: int, status: str, note: str = "") -> None:
+    """Change an item's physical status. ``loaned`` is only set by ``open_loan``.
+
+    If the item is currently loaned, its open loan is closed first (with a
+    note), so status and loans never disagree. ``box_items.status`` (AI
+    certainty) is never touched.
+    """
+    status = (status or "").strip()
+    note = (note or "").strip()
+    if status not in LIFECYCLE_STATUSES:
+        raise LifecycleError(f"Unknown status '{status}'.")
+    if status == "loaned":
+        raise LifecycleError("Use Lend to record who has the item; that sets the status to Loaned.")
+    item = get_box_item(conn, item_id)
+    if not item:
+        raise LifecycleError("Item not found.")
+    current_loan = get_open_loan(conn, item_id)
+    if current_loan:
+        _close_loan(conn, current_loan, _today(), f"Closed when status changed to {LIFECYCLE_LABELS[status]}.")
+    conn.execute(
+        """UPDATE box_items SET lifecycle_status = ?, status_note = ?, status_changed_at = CURRENT_TIMESTAMP,
+                  updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+        (status, note, item_id),
+    )
+    record_history(
+        conn,
+        "box_item",
+        item_id,
+        "lifecycle_changed",
+        before={"lifecycle_status": item.get("lifecycle_status"), "status_note": item.get("status_note")},
+        after={"lifecycle_status": status, "status_note": note},
+    )
+
+
+def open_loan(
+    conn: sqlite3.Connection,
+    item_id: int,
+    borrower_name: str,
+    borrower_contact: str = "",
+    loaned_at: str | None = None,
+    due_at: str | None = None,
+    notes: str = "",
+) -> int:
+    item = get_box_item(conn, item_id)
+    if not item:
+        raise LifecycleError("Item not found.")
+    borrower_name = (borrower_name or "").strip()
+    if not borrower_name:
+        raise LifecycleError("Borrower name is required.")
+    if item.get("lifecycle_status") in GONE_STATUSES:
+        raise LifecycleError(f"This item is marked {LIFECYCLE_LABELS[item['lifecycle_status']]}, so it can't be lent.")
+    if get_open_loan(conn, item_id):
+        raise LifecycleError("This item is already lent out. Mark it returned first.")
+    loaned_at = (loaned_at or "").strip() or _today()
+    due_at = (due_at or "").strip() or None
+    cur = conn.execute(
+        """INSERT INTO loans(box_item_id, borrower_name, borrower_contact, loaned_at, due_at, notes)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (item_id, borrower_name, (borrower_contact or "").strip(), loaned_at, due_at, (notes or "").strip()),
+    )
+    loan_id = int(cur.lastrowid)
+    conn.execute(
+        """UPDATE box_items SET lifecycle_status = 'loaned', status_note = '', status_changed_at = CURRENT_TIMESTAMP,
+                  updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+        (item_id,),
+    )
+    record_history(
+        conn,
+        "box_item",
+        item_id,
+        "loaned",
+        before={"lifecycle_status": item.get("lifecycle_status")},
+        after={"loan_id": loan_id, "borrower_name": borrower_name, "loaned_at": loaned_at, "due_at": due_at},
+    )
+    return loan_id
+
+
+def _close_loan(conn: sqlite3.Connection, loan: dict[str, Any], returned_at: str, extra_note: str = "") -> None:
+    notes = loan.get("notes") or ""
+    if extra_note:
+        notes = f"{notes}\n{extra_note}".strip()
+    conn.execute("UPDATE loans SET returned_at = ?, notes = ? WHERE id = ?", (returned_at, notes, loan["id"]))
+    record_history(conn, "loan", loan["id"], "returned", before={"returned_at": None}, after={"returned_at": returned_at})
+
+
+def return_loan(conn: sqlite3.Connection, loan_id: int, returned_at: str | None = None) -> int:
+    """Close a loan and put the item back ``in_home``. Returns the item id."""
+    loan = row(conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)))
+    if not loan:
+        raise LifecycleError("Loan not found.")
+    if loan.get("returned_at"):
+        raise LifecycleError("This loan is already closed.")
+    returned_at = (returned_at or "").strip() or _today()
+    _close_loan(conn, loan, returned_at)
+    conn.execute(
+        """UPDATE box_items SET lifecycle_status = 'in_home', status_note = '', status_changed_at = CURRENT_TIMESTAMP,
+                  updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+        (loan["box_item_id"],),
+    )
+    record_history(
+        conn,
+        "box_item",
+        loan["box_item_id"],
+        "returned",
+        before={"lifecycle_status": "loaned"},
+        after={"lifecycle_status": "in_home", "loan_id": loan_id},
+    )
+    return int(loan["box_item_id"])
+
+
+def list_open_loans(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Open loans with item and container names, and an ``overdue`` flag."""
+    today = _today()
+    loans = rows(
+        conn.execute(
+            """SELECT ln.*, bi.item_name, bi.box_id, b.name AS box_name, b.public_id
+               FROM loans ln
+               JOIN box_items bi ON bi.id = ln.box_item_id
+               JOIN boxes b ON b.id = bi.box_id
+               WHERE ln.returned_at IS NULL
+               ORDER BY ln.due_at IS NULL, ln.due_at, ln.loaned_at"""
+        )
+    )
+    for loan in loans:
+        loan["overdue"] = bool(loan.get("due_at")) and loan["due_at"] < today
+    return loans
+
+
+def list_loans_for_item(conn: sqlite3.Connection, item_id: int) -> list[dict[str, Any]]:
+    return rows(conn.execute("SELECT * FROM loans WHERE box_item_id = ? ORDER BY loaned_at DESC, id DESC", (item_id,)))
+
+
+def count_items_out_of_house(conn: sqlite3.Connection) -> int:
+    placeholders = ", ".join("?" for _ in OUT_OF_HOUSE_STATUSES)
+    found = row(
+        conn.execute(f"SELECT COUNT(*) AS n FROM box_items WHERE lifecycle_status IN ({placeholders})", OUT_OF_HOUSE_STATUSES)
+    )
+    return int(found["n"]) if found else 0
+
+
+def verify_container(conn: sqlite3.Connection, box_id: int, present_item_ids: list[int], mark_missing: bool = False) -> dict[str, int]:
+    """Verify mode: ticked items (and the container) get today's date.
+
+    Unticked items that are ``in_home`` can be marked ``missing``. Items that
+    are elsewhere (loaned, gone and so on) are left alone. A ticked item that
+    was ``missing`` goes back to ``in_home``.
+    """
+    today = _today()
+    items = rows(conn.execute("SELECT id, lifecycle_status FROM box_items WHERE box_id = ?", (box_id,)))
+    present = {int(value) for value in present_item_ids}
+    verified = 0
+    missing = 0
+    for item in items:
+        if item["id"] in present:
+            conn.execute("UPDATE box_items SET last_verified_at = ? WHERE id = ?", (today, item["id"]))
+            if item["lifecycle_status"] == "missing":
+                set_lifecycle_status(conn, item["id"], "in_home", "Found during verification.")
+            verified += 1
+        elif mark_missing and item["lifecycle_status"] == "in_home":
+            set_lifecycle_status(conn, item["id"], "missing", f"Not found when verifying on {today}.")
+            missing += 1
+    conn.execute("UPDATE boxes SET last_verified_at = ? WHERE id = ?", (today, box_id))
+    record_history(conn, "container", box_id, "verified", after={"verified": verified, "marked_missing": missing, "date": today})
+    return {"verified": verified, "marked_missing": missing}
+
+
+def attach_lifecycle_info(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add display fields (label, gone flag, open loan) to item dicts."""
+    for item in items:
+        status = item.get("lifecycle_status") or "in_home"
+        item["lifecycle_label"] = LIFECYCLE_LABELS.get(status, status)
+        item["is_gone"] = status in GONE_STATUSES
+        item["open_loan"] = get_open_loan(conn, item["id"]) if status == "loaned" else None
+    return items
+
+
+# ---------------------------------------------------------------------------
+# QW-2: estimated value totals (latest estimate x quantity, confirmed items)
+# ---------------------------------------------------------------------------
+
+def descendant_box_ids(conn: sqlite3.Connection, box_id: int) -> list[int]:
+    """The container and every container nested inside it, at any depth."""
+    ids = [box_id]
+    seen = {box_id}
+    queue = [box_id]
+    while queue:
+        current = queue.pop()
+        for child in conn.execute("SELECT id FROM boxes WHERE parent_box_id = ?", (current,)).fetchall():
+            child_id = int(child["id"])
+            if child_id not in seen:
+                seen.add(child_id)
+                ids.append(child_id)
+                queue.append(child_id)
+    return ids
+
+
+def _value_totals(conn: sqlite3.Connection, where: str, params: tuple) -> dict[str, Any]:
+    """Sum of latest per-unit estimate x current quantity for confirmed items.
+
+    Items that have left the household (donated, sold, given away, discarded)
+    are not counted. ``unestimated`` counts confirmed items with no estimate.
+    """
+    gone = ", ".join("?" for _ in GONE_STATUSES)
+    found = row(
+        conn.execute(
+            f"""SELECT
+                  COALESCE(SUM(CASE WHEN ce.estimated_cost_usd IS NOT NULL THEN ce.estimated_cost_usd * bi.quantity END), 0) AS total,
+                  COALESCE(SUM(CASE WHEN ce.estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END), 0) AS estimated,
+                  COALESCE(SUM(CASE WHEN ce.estimated_cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unestimated
+                FROM box_items bi
+                LEFT JOIN cost_estimates ce ON ce.id = (
+                    SELECT id FROM cost_estimates WHERE box_item_id = bi.id ORDER BY created_at DESC, id DESC LIMIT 1
+                )
+                WHERE bi.status = 'confirmed' AND bi.lifecycle_status NOT IN ({gone}) AND {where}""",
+            (*GONE_STATUSES, *params),
+        )
+    )
+    if not found:
+        return {"total": 0.0, "estimated": 0, "unestimated": 0}
+    return {"total": round(float(found["total"]), 2), "estimated": int(found["estimated"]), "unestimated": int(found["unestimated"])}
+
+
+def container_value_totals(conn: sqlite3.Connection, box_id: int) -> dict[str, Any]:
+    """Totals for a container, including everything nested inside it."""
+    ids = descendant_box_ids(conn, box_id)
+    placeholders = ", ".join("?" for _ in ids)
+    return _value_totals(conn, f"bi.box_id IN ({placeholders})", tuple(ids))
+
+
+def household_value_totals(conn: sqlite3.Connection) -> dict[str, Any]:
+    return _value_totals(conn, "1 = 1", ())

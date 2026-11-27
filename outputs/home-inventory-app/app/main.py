@@ -46,6 +46,21 @@ from .repository import (
     update_box_item,
     update_box_location,
 )
+from .repository import (
+    LIFECYCLE_LABELS,
+    LIFECYCLE_STATUSES,
+    LifecycleError,
+    attach_lifecycle_info,
+    container_value_totals,
+    count_items_out_of_house,
+    household_value_totals,
+    list_loans_for_item,
+    list_open_loans,
+    open_loan,
+    return_loan,
+    set_lifecycle_status,
+    verify_container,
+)
 from . import scheduler
 from .scheduler import ARMED_KEY, DEEP_SCAN_HOUR, LAST_RUN_KEY
 from .services.cost_lookup import (
@@ -140,6 +155,21 @@ def attach_cost_lookup_info(conn, box: dict) -> dict:
     return box
 
 
+def container_page_context(conn, box: dict) -> dict:
+    """Shared context for the desktop and mobile container pages (QW-2, WS-1)."""
+    attach_cost_lookup_info(conn, box)
+    attach_lifecycle_info(conn, box.get("items", []))
+    return {
+        "box": box,
+        "categories": HOUSEHOLD_CATEGORIES,
+        "room_options": room_options(conn),
+        "cost_lookup_enabled": cost_lookup_enabled(),
+        "value_totals": container_value_totals(conn, box["id"]),
+        "lifecycle_statuses": LIFECYCLE_STATUSES,
+        "lifecycle_labels": LIFECYCLE_LABELS,
+    }
+
+
 def _bonsai_ready() -> bool:
     try:
         response = requests.get(f"{bonsai_base_url()}/v1/models", timeout=2)
@@ -211,7 +241,16 @@ def dashboard(request: Request, conn=Depends(db)):
 
     return templates.TemplateResponse(
         "dashboard.html",
-        {"request": request, "boxes": boxes, "rooms": rooms, "external_url": external_url, "llm_status": llm_status()},
+        {
+            "request": request,
+            "boxes": boxes,
+            "rooms": rooms,
+            "external_url": external_url,
+            "llm_status": llm_status(),
+            "open_loans": list_open_loans(conn),
+            "out_of_house_count": count_items_out_of_house(conn),
+            "value_totals": household_value_totals(conn),
+        },
     )
 
 
@@ -233,19 +272,9 @@ def public_box_page(public_id: str, request: Request, conn=Depends(db)):
     box = get_box(conn, public_id=public_id)
     if not box:
         raise HTTPException(404, "Container not found")
-    attach_cost_lookup_info(conn, box)
-    all_boxes = list_boxes(conn)
     return templates.TemplateResponse(
         "container_detail.html",
-        {
-            "request": request,
-            "box": box,
-            "boxes": all_boxes,
-            "mobile": True,
-            "categories": HOUSEHOLD_CATEGORIES,
-            "room_options": room_options(conn),
-            "cost_lookup_enabled": cost_lookup_enabled(),
-        },
+        {"request": request, "boxes": list_boxes(conn), "mobile": True, **container_page_context(conn, box)},
     )
 
 
@@ -254,18 +283,9 @@ def box_detail_page(box_id: int, request: Request, conn=Depends(db)):
     box = get_box(conn, box_id=box_id)
     if not box:
         raise HTTPException(404, "Container not found")
-    attach_cost_lookup_info(conn, box)
     return templates.TemplateResponse(
         "container_detail.html",
-        {
-            "request": request,
-            "box": box,
-            "boxes": list_boxes(conn),
-            "mobile": False,
-            "categories": HOUSEHOLD_CATEGORIES,
-            "room_options": room_options(conn),
-            "cost_lookup_enabled": cost_lookup_enabled(),
-        },
+        {"request": request, "boxes": list_boxes(conn), "mobile": False, **container_page_context(conn, box)},
     )
 
 
@@ -302,13 +322,13 @@ def capture_container_page(public_id: str, request: Request, conn=Depends(db)):
 
 
 @app.get("/search", response_class=HTMLResponse)
-def search_page(request: Request, q: str = "", room: str = "", tag: str = "", category: str = "", min_confidence: float = 0, conn=Depends(db)):
-    results = search_items(conn, q, room, tag, category, min_confidence)
+def search_page(request: Request, q: str = "", room: str = "", tag: str = "", category: str = "", min_confidence: float = 0, lifecycle: str = "", conn=Depends(db)):
+    results = attach_lifecycle_info(conn, search_items(conn, q, room, tag, category, min_confidence, lifecycle))
     similar = similar_items(conn, q) if q else []
     rooms = rows(conn.execute("SELECT DISTINCT room_name FROM box_locations ORDER BY room_name"))
     return templates.TemplateResponse(
         "search.html",
-        {"request": request, "q": q, "room": room, "tag": tag, "category": category, "min_confidence": min_confidence, "results": results, "rooms": rooms, "similar": similar, "categories": HOUSEHOLD_CATEGORIES},
+        {"request": request, "q": q, "room": room, "tag": tag, "category": category, "min_confidence": min_confidence, "results": results, "rooms": rooms, "similar": similar, "categories": HOUSEHOLD_CATEGORIES, "lifecycle": lifecycle, "lifecycle_statuses": LIFECYCLE_STATUSES, "lifecycle_labels": LIFECYCLE_LABELS},
     )
 
 
@@ -919,8 +939,8 @@ def api_list_item_cost_estimates(item_id: int, conn=Depends(db)):
 
 
 @app.get("/api/search")
-def api_search(q: str = "", room: str = "", tag: str = "", category: str = "", min_confidence: float = 0, conn=Depends(db)):
-    return {"results": search_items(conn, q, room, tag, category, min_confidence)}
+def api_search(q: str = "", room: str = "", tag: str = "", category: str = "", min_confidence: float = 0, lifecycle: str = "", conn=Depends(db)):
+    return {"results": attach_lifecycle_info(conn, search_items(conn, q, room, tag, category, min_confidence, lifecycle))}
 
 
 @app.get("/export.json")
@@ -931,6 +951,7 @@ def export_json(conn=Depends(db)):
         "items": rows(conn.execute("SELECT * FROM box_items")),
         "photos": rows(conn.execute("SELECT * FROM box_photos")),
         "locations": rows(conn.execute("SELECT * FROM box_locations")),
+        "loans": rows(conn.execute("SELECT * FROM loans ORDER BY box_item_id, loaned_at")),
         "history": rows(conn.execute("SELECT * FROM edit_history")),
     }
     return JSONResponse(data)
@@ -938,10 +959,115 @@ def export_json(conn=Depends(db)):
 
 @app.get("/export.csv")
 def export_csv(conn=Depends(db)):
+    """CSV export. The first 11 columns keep their original names and order;
+    newer columns are only ever appended (QW-1, then WS-1)."""
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["item", "quantity", "status", "confidence", "box", "room", "north_ft", "east_ft", "elevation_ft", "tags", "notes"])
+    writer.writerow(
+        [
+            "item", "quantity", "status", "confidence", "box", "room", "north_ft", "east_ft", "elevation_ft", "tags", "notes",
+            # QW-1
+            "category", "container_path", "estimated_cost_usd", "estimate_date",
+            # WS-1
+            "lifecycle_status", "status_note", "last_verified_at", "loaned_to", "loan_due",
+        ]
+    )
     for item in search_items(conn):
-        writer.writerow([item["item_name"], item["quantity"], item["status"], item["confidence"], item["box_name"], item["room_name"], item["north_ft"], item["east_ft"], item["elevation_ft"], item["tags"], item["notes"]])
+        estimate = latest_cost_estimate(conn, item["id"])
+        has_cost = bool(estimate) and estimate["estimated_cost_usd"] is not None
+        loan = conn.execute(
+            "SELECT borrower_name, due_at FROM loans WHERE box_item_id = ? AND returned_at IS NULL", (item["id"],)
+        ).fetchone()
+        writer.writerow(
+            [
+                item["item_name"], item["quantity"], item["status"], item["confidence"], item["box_name"], item["room_name"],
+                item["north_ft"], item["east_ft"], item["elevation_ft"], item["tags"], item["notes"],
+                item.get("category") or "",
+                (item.get("container_path") or item["box_name"]).replace(" -> ", " > "),
+                estimate["estimated_cost_usd"] if has_cost else "",
+                (estimate["created_at"] or "")[:10] if has_cost else "",
+                item.get("lifecycle_status") or "in_home",
+                item.get("status_note") or "",
+                item.get("last_verified_at") or "",
+                loan["borrower_name"] if loan else "",
+                (loan["due_at"] or "") if loan else "",
+            ]
+        )
     output.seek(0)
     return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=home-inventory.csv"})
+
+
+# ---------------------------------------------------------------------------
+# WS-1: lifecycle status, loans and verify mode
+# ---------------------------------------------------------------------------
+
+def _item_view(conn, item_id: int) -> dict:
+    return attach_lifecycle_info(conn, [get_box_item(conn, item_id)])[0]
+
+
+@app.patch("/api/box-items/{item_id}/lifecycle")
+async def api_set_lifecycle(item_id: int, request: Request, conn=Depends(db)):
+    """Body: {"lifecycle_status": "in_repair", "status_note": "At Joe's Repair"}."""
+    data = await request.json()
+    try:
+        set_lifecycle_status(conn, item_id, str(data.get("lifecycle_status") or ""), str(data.get("status_note") or ""))
+    except LifecycleError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _item_view(conn, item_id)
+
+
+@app.post("/api/box-items/{item_id}/loans")
+async def api_open_loan(item_id: int, request: Request, conn=Depends(db)):
+    """Body: {"borrower_name": "Dave", "borrower_contact": "", "loaned_at": "", "due_at": "2026-12-15", "notes": ""}."""
+    data = await request.json()
+    try:
+        loan_id = open_loan(
+            conn,
+            item_id,
+            str(data.get("borrower_name") or ""),
+            str(data.get("borrower_contact") or ""),
+            str(data.get("loaned_at") or ""),
+            str(data.get("due_at") or ""),
+            str(data.get("notes") or ""),
+        )
+    except LifecycleError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"loan_id": loan_id, "item": _item_view(conn, item_id)}
+
+
+@app.post("/api/loans/{loan_id}/return")
+async def api_return_loan(loan_id: int, request: Request, conn=Depends(db)):
+    """Body (optional): {"returned_at": "2026-12-01"}; defaults to today."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    try:
+        item_id = return_loan(conn, loan_id, str((data or {}).get("returned_at") or ""))
+    except LifecycleError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "item": _item_view(conn, item_id)}
+
+
+@app.get("/api/loans")
+def api_list_loans(open: bool = True, conn=Depends(db)):
+    if open:
+        return {"loans": list_open_loans(conn)}
+    return {"loans": rows(conn.execute("SELECT * FROM loans ORDER BY loaned_at DESC, id DESC"))}
+
+
+@app.get("/api/box-items/{item_id}/loans")
+def api_item_loans(item_id: int, conn=Depends(db)):
+    if not get_box_item(conn, item_id):
+        raise HTTPException(404, "Item not found")
+    return {"loans": list_loans_for_item(conn, item_id)}
+
+
+@app.post("/api/boxes/{box_id}/verify")
+async def api_verify_container(box_id: int, request: Request, conn=Depends(db)):
+    """Body: {"present_item_ids": [1, 2], "mark_missing": false}."""
+    if not get_box(conn, box_id=box_id):
+        raise HTTPException(404, "Container not found")
+    data = await request.json()
+    present = [int(value) for value in (data.get("present_item_ids") or [])]
+    return verify_container(conn, box_id, present, bool(data.get("mark_missing")))

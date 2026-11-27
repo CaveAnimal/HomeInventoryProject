@@ -23,3 +23,4 @@ Status values: `parked` → `promoted` or `dropped`.
 | [BL-005](BL-005-barcode-check-in-out.md) | Barcode/QR check-in and check-out for loans | summary_suggestions WS-1 | parked |
 | [BL-006](BL-006-report-branding.md) | Report branding / white-labeling | summary_suggestions WS-3 | parked |
 | [BL-007](BL-007-optional-local-backup-encryption.md) | Optional encryption for the local backup | summary_suggestions WS-10 / PD-11 | parked |
+| [BL-008](BL-008-owner-actions-pending.md) | Owner actions pending (backup key, OneDrive check, app restart, deferred tests) | summary_suggestions TODO | parked |

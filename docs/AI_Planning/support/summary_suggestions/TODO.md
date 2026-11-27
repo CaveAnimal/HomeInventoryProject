@@ -35,13 +35,15 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 
 | Phase | Name | Tasks | Done |
 |---|---|---|---|
-| 0 | Discovery, data safety, spikes | 7 | 2 |
-| 1 | WS-0 Quick wins (QW-1…QW-5) | 5 | 0 |
-| 2 | WS-1 Status + loans | 10 | 0 |
+| 0 | Discovery, data safety, spikes | 7 | 5 (2 paused) |
+| 1 | WS-0 Quick wins (QW-1…QW-5) | 5 | 4 (1 paused) |
+| 2 | WS-1 Status + loans | 10 | 9 (1 paused) |
 | 3–11 | Later workstreams | coarse | — |
-| **Total (detailed)** | | **22** | **2 (9%)** |
+| **Total (detailed)** | | **22** | **18 (82%), 4 paused** |
 
-**Next milestone:** Task 0.3, QW-6: an encrypted copy of the owner's data in OneDrive, restored successfully from a clean folder.
+**Next milestone:** owner actions in [BL-008](../../backlog/BL-008-owner-actions-pending.md) (move the backup key off the PC, restart the app). Paused tasks (QW-4, SP-3, SP-7, 2.9) wait for the owner's go-ahead on testing. Then refine Phase 3 (WS-11) after SP-10.
+
+> **2026-11-26 owner direction:** "Do what you can do with what you have. If you are waiting on me, then put it on backlog. Skip the testing for now. Finish the work!" Test-related acceptance criteria below were **not** run unless marked; the paused tasks hold them.
 
 ---
 
@@ -59,7 +61,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 ### 0.2 ✅ Write DECISIONS.md
 - [x] PD-1…PD-17, inherited decisions, SC-1…SC-6. Approved 2026-11-26.
 
-### 0.3 🔄 QW-6 — Encrypted off-site copy of each snapshot (age → OneDrive)
+### 0.3 ✅ QW-6 — Encrypted off-site copy of each snapshot (age → OneDrive)
 **Purpose:** a second location for the owner's data that survives fire or theft at home, readable only with a key kept off the PC. Implements PD-16.
 **Files:** repo root `backup-data.ps1`, `.gitignore`; new repo root `backup-offsite.recipient` (public key only).
 
@@ -88,7 +90,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] `git status` shows no `*.agekey` file; only the public key is committed.
 - [ ] PD-16 assumptions 1–4 marked ✅ or ❌ in DECISIONS.md.
 
-### 0.4 ⬜ SP-1 — Can existing items be linked to their photo? (1 h)
+### 0.4 ✅ SP-1 — Can existing items be linked to their photo? (1 h)
 **Purpose:** decides whether WS-2/WS-7 can backfill the item → photo link (CONTEXT.md §4 Scenario 11).
 **Method:** read-only queries on a **copy** of the live DB. For each `box_items` row, find `detection_suggestions` rows with `status='confirmed'` in the same box with a matching `normalized_name` / `item_name`. Count: exactly one photo / several photos / none.
 
@@ -97,7 +99,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] Findings and a recommended backfill rule recorded in DECISIONS.md §4 (validation log).
 - [ ] Live `data/` not opened for writing.
 
-### 0.5 ⬜ SP-3 — Which local PDF approach works on this PC? (2 h)
+### 0.5 ⏸️ SP-3 — Which local PDF approach works on this PC? (2 h)
 **Purpose:** decides PD-7 before WS-3.
 **Method:** render the same sample (cover page, a 100-row table, 50 photo thumbnails from `test-data` or generated images) with (a) HTML + headless Edge/Chrome print-to-PDF, (b) WeasyPrint, (c) ReportLab. No cloud service.
 
@@ -106,7 +108,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] One approach recommended; PD-7 set to ACCEPTED (with owner approval) or left PROPOSED with the reason.
 - [ ] Sample PDFs kept outside the repo, or in `work/` if the owner wants them.
 
-### 0.6 ⬜ SP-7 — Can a typical household PC run the vision model? (3 h)
+### 0.6 ⏸️ SP-7 — Can a typical household PC run the vision model? (3 h)
 **Purpose:** tests PD-9 assumption 1, the biggest risk to the licensing model.
 **Method:** using `scripts/vision_eval/` and its golden set, measure detection quality and time per photo for (a) the current Bonsai 27B, (b) at least two smaller vision models (for example a 7–8B and a 2–4B), run **CPU-only** and with whatever GPU is available. Record RAM and VRAM use.
 
@@ -116,7 +118,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] PD-9 assumption 1 marked ✅ or ❌. If ❌: PD-9 flagged and escalated to the owner (Decision Validation Loop) before WS-4 or WS-9 are refined.
 - [ ] No change to the app's default model.
 
-### 0.7 ⬜ Phase 0 check-in
+### 0.7 ✅ Phase 0 check-in
 - [ ] Owner sees: the restored backup from 0.3, and the spike results.
 - [ ] Retro notes added to the completion log. Phase 1 tasks adjusted if the spikes changed anything.
 
@@ -130,7 +132,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 
 > **Order note.** QW-4 (tests) goes first so every later change is checked against a green suite.
 
-### 1.1 ⬜ QW-4 — Make the test suite pass on Windows
+### 1.1 ⏸️ QW-4 — Make the test suite pass on Windows
 **Purpose:** a trustworthy baseline (CONTEXT.md §4 Scenario 7). Implements PD-17.
 **Files:** `tests/*.py`, possibly a new `tests/fakes.py`.
 
@@ -141,7 +143,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] Full suite: **57+ pass, 0 fail** (or a failure with a written, owner-accepted reason in the completion log).
 - [ ] Tests still never touch `data/`.
 
-### 1.2 ⬜ QW-3 — Fix the README setup section
+### 1.2 ✅ QW-3 — Fix the README setup section
 **Files:** `README.md` (app), repository root README if it repeats setup.
 
 **Acceptance criteria**
@@ -149,7 +151,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] No remaining mention of port 8000 or the old path.
 - [ ] Mentions `backup-data.ps1` and where the restore steps are (no key material).
 
-### 1.3 ⬜ QW-1 — Add category, container path and latest estimate to the CSV
+### 1.3 ✅ QW-1 — Add category, container path and latest estimate to the CSV
 **Files:** `app/main.py` (`export_csv`), `app/repository.py` or `services/search.py` (data), tests.
 
 **Acceptance criteria**
@@ -158,7 +160,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] Nested containers produce the full path; a top-level container produces its own name.
 - [ ] Test covers: column order, a nested path, an item with and without an estimate.
 
-### 1.4 ⬜ QW-2 — Show total estimated value on container pages and the dashboard
+### 1.4 ✅ QW-2 — Show total estimated value on container pages and the dashboard
 **Files:** `app/repository.py`, `app/main.py`, `templates/container_detail.html`, `templates/dashboard.html`, tests.
 
 **Acceptance criteria**
@@ -168,7 +170,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] Labeled as an estimate.
 - [ ] Tests cover rollup through two levels of nesting and the unestimated count.
 
-### 1.5 ⬜ QW-5 — Count failed cost lookups toward the monthly limit
+### 1.5 ✅ QW-5 — Count failed cost lookups toward the monthly limit
 **Files:** `app/services/cost_lookup.py`, maybe a migration if attempts need their own table (back up `data/` first if so), tests.
 
 **Acceptance criteria**
@@ -190,14 +192,14 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - New `loans` table: `id, box_item_id → box_items, borrower_name, borrower_contact, loaned_at, due_at, returned_at, notes, created_at`. Open loan = `returned_at IS NULL`. At most one open loan per item.
 - `loaned` is set **only** by opening a loan, and left **only** by returning it (or by another status change that closes the loan with a note). This keeps status and loans consistent.
 
-### 2.1 ⬜ Migration `008_lifecycle_and_loans.sql`
+### 2.1 ✅ Migration `009_lifecycle_and_loans.sql` (008 went to QW-5)
 **Acceptance criteria**
 - [ ] **`data/` backed up first** (copy recorded in the completion log).
 - [ ] Adds the columns above with defaults (`lifecycle_status` default `'in_home'`), the `loans` table, and an index for open loans.
 - [ ] Additive only: no existing column dropped, renamed or retyped.
 - [ ] Applies cleanly to a **copy** of the live DB; all 56 existing items read as `in_home`; existing tests pass.
 
-### 2.2 ⬜ Repository functions for status, loans and verification
+### 2.2 ✅ Repository functions for status, loans and verification
 **Files:** `app/repository.py`.
 **Acceptance criteria**
 - [ ] `set_lifecycle_status(conn, item_id, status, note)` validates the ten values, refuses `loaned` (use loans), sets `status_changed_at`, writes `edit_history`.
@@ -207,14 +209,14 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] `verify_container(conn, box_id, present_item_ids, mark_missing)` sets `last_verified_at` on ticked items and the container, and optionally marks unticked items `missing`.
 - [ ] `box_items.status` (AI certainty) is never touched by any of these.
 
-### 2.3 ⬜ API endpoints
+### 2.3 ✅ API endpoints
 **Files:** `app/main.py`.
 **Acceptance criteria**
 - [ ] `PATCH /api/box-items/{id}/lifecycle`, `POST /api/box-items/{id}/loans`, `POST /api/loans/{id}/return`, `GET /api/loans?open=true`, `POST /api/boxes/{id}/verify`.
 - [ ] Invalid status, double loan, or returning a closed loan → 400 with a clear message.
 - [ ] Pydantic request models; responses include the updated item or loan.
 
-### 2.4 ⬜ Item status and loan UI on the container page
+### 2.4 ✅ Item status and loan UI on the container page
 **Files:** `templates/container_detail.html`, `app/static/app.js`, `capture.css` as needed.
 **Acceptance criteria**
 - [ ] Each item shows **Status** (lifecycle) and, separately labeled, **AI certainty** (PD-2).
@@ -222,32 +224,32 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] Gone items are visibly marked (muted, with the status).
 - [ ] Works on iPhone Safari at phone width.
 
-### 2.5 ⬜ Dashboard "Lent out" panel and out-of-house count
+### 2.5 ✅ Dashboard "Lent out" panel and out-of-house count
 **Acceptance criteria**
 - [ ] Lists open loans (item, borrower, since, due), overdue ones highlighted.
 - [ ] Shows the count of items out of the house (`loaned` + `in_repair` + `in_vehicle` + `in_storage_offsite`).
 - [ ] Empty state when nothing is lent out.
 
-### 2.6 ⬜ Status in search and on the QR page
+### 2.6 ✅ Status in search and on the QR page
 **Files:** `app/services/search.py`, `templates/search.html`, QR public page template.
 **Acceptance criteria**
 - [ ] Search can filter by lifecycle status. Default shows all, with gone items marked.
 - [ ] Results and the QR page show status and loan info next to location ("Loaned to Dave since 2026-10-02").
 - [ ] Existing search tests still pass.
 
-### 2.7 ⬜ Status in exports
+### 2.7 ✅ Status in exports
 **Acceptance criteria**
 - [ ] CSV appends `lifecycle_status`, `status_note`, `last_verified_at`, and open loan borrower/due columns **after** the QW-1 columns.
 - [ ] `export.json` includes the same fields and loan history per item.
 - [ ] Test covers the column order.
 
-### 2.8 ⬜ Verify mode
+### 2.8 ✅ Verify mode
 **Acceptance criteria**
 - [ ] From a container page (and from its QR page), the user ticks items still present and saves.
 - [ ] Ticked items and the container get today's `last_verified_at`. Unticked items can be bulk-marked `missing` with a confirmation.
 - [ ] "Last verified" date shown on items and containers.
 
-### 2.9 ⬜ Tests for WS-1
+### 2.9 ⏸️ Tests for WS-1
 **Acceptance criteria**
 - [ ] All ten statuses settable (except `loaned` directly), each writing `edit_history`.
 - [ ] Loan open → return → history kept; double loan refused; overdue flag correct.
@@ -255,7 +257,7 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 - [ ] `status` (AI certainty) unchanged by every WS-1 action.
 - [ ] Full suite green.
 
-### 2.10 ⬜ Phase 2 check-in and docs
+### 2.10 ✅ Phase 2 check-in and docs
 **Acceptance criteria**
 - [ ] README describes statuses, loans and verify mode.
 - [ ] GOALS.md WS-1 success criteria checked.
@@ -312,3 +314,13 @@ Pillar 4 of GOAL → CONTEXT → DECISIONS → TODO. Rolling wave: Phases 0–2 
 |---|---|---|
 | 2026-11-26 | 0.1 CONTEXT.md | Approved by owner |
 | 2026-11-26 | 0.2 DECISIONS.md | Approved by owner |
+| 2026-11-26 | 0.3 QW-6 | `backup-data.ps1` encrypts each snapshot with age to `backup-offsite.recipient` and writes it to OneDrive `HomeInventoryBackups` (keep 3). Verified with a throwaway key: restore OK (integrity ok, 9 containers, 56 items, 11/11 photos), wrong/no key refused, skip, catch-up, prune, failure exit 2. Real key created at `%USERPROFILE%\.home-inventory-keys` (owner to move it to USB: BL-008). First real off-site file: `20261123-152641.tar.age`, 46.9 MB. Task runs as `jpful`, the OneDrive owner. `*.agekey` git-ignored |
+| 2026-11-26 | 0.4 SP-1 | 56 items: 48 match exactly one photo through a confirmed detection; 8 have no matching detection but sit in a container with exactly one photo; 0 ambiguous. Backfill rule recorded in DECISIONS.md §4 |
+| 2026-11-26 | 0.5, 0.6, 1.1, 2.9 | Paused by owner direction (skip testing). Listed in BL-008 |
+| 2026-11-26 | 0.7 | Check-in replaced by the end-of-day report to the owner |
+| 2026-11-26 | 1.2 QW-3 | README: setup via `start.ps1`, port 1800, Bonsai requirement, Backups section; no port 8000 left |
+| 2026-11-26 | 1.3 QW-1 | CSV appends category, container_path (`A > B > C`), estimated_cost_usd, estimate_date; first 11 columns unchanged. Tests not written (paused) |
+| 2026-11-26 | 1.4 QW-2 | `container_value_totals` (nested) and `household_value_totals`; shown on container pages and the dashboard with the unestimated count. Gone items excluded. Tests not written (paused) |
+| 2026-11-26 | 1.5 QW-5 | Migration `008_cost_lookup_attempts` (backfilled from existing estimates); every outbound attempt recorded and committed before the call; limit read at call time. Tests not written (paused) |
+| 2026-11-26 | 2.1–2.8 | Migration `009_lifecycle_and_loans`; repository (status, loans, verify, out-of-house count); 6 API endpoints; container-page status/loan UI and verify mode; dashboard Lent-out panel; search filter and badges (QR page shares the container template); CSV/JSON export fields. Migrations 008+009 applied to a copy of the live DB: integrity ok, 56/56 items `in_home`. App imports and templates parse. Live DB migrates on next app restart (BL-008) |
+| 2026-11-26 | 2.10 | README section "Status, Loans and Verify Mode". Screenshot demo waits for the app restart (BL-008) |

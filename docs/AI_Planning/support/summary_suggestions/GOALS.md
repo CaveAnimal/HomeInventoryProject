@@ -145,12 +145,12 @@ Each workstream uses the framework's GOAL template sections. A workstream marked
 **Why:** Immediate usefulness for insurance exports and day-to-day trust in the app. They also provide the value totals that WS-3 needs.
 
 **Success Criteria**
-- [ ] QW-1: The CSV export includes `category`, `container_path` and the latest estimated cost with its date (`export.csv`). Existing columns keep their order, and new columns are appended.
-- [ ] QW-2: The container detail page and the dashboard show **total estimated value** (sum of latest estimate × quantity for confirmed items). Child containers roll up into their parent, and the number of unestimated items is shown next to the total.
-- [ ] QW-3: The app README setup section reflects the current path, port 1800 and `start.ps1` usage.
+- [x] QW-1: The CSV export includes `category`, `container_path` and the latest estimated cost with its date (`export.csv`). Existing columns keep their order, and new columns are appended.
+- [x] QW-2: The container detail page and the dashboard show **total estimated value** (sum of latest estimate × quantity for confirmed items). Child containers roll up into their parent, and the number of unestimated items is shown next to the total.
+- [x] QW-3: The app README setup section reflects the current path, port 1800 and `start.ps1` usage.
 - [ ] QW-4: The SQLite file-lock teardown failures in tests are fixed on Windows. The suite runs with only failures that have a written, accepted reason, or none at all.
-- [ ] QW-5: Failed cost lookups (outbound attempts) count toward `COST_LOOKUP_MONTHLY_LIMIT`, closing the accepted gap from cost_of_replacement.
-- [ ] QW-6: `backup-data.ps1` can copy each snapshot to an off-site destination (configurable path, for example a OneDrive-synced folder or the NAS), and logs whether that copy succeeded. *Interim measure for the owner's install. The off-site copy must be encrypted, using the PD-12 engine if SP-9 has concluded, otherwise an encrypted archive. WS-10 replaces this script.*
+- [x] QW-5: Failed cost lookups (outbound attempts) count toward `COST_LOOKUP_MONTHLY_LIMIT`, closing the accepted gap from cost_of_replacement.
+- [x] QW-6: `backup-data.ps1` can copy each snapshot to an off-site destination (configurable path, for example a OneDrive-synced folder or the NAS), and logs whether that copy succeeded. *Interim measure for the owner's install. The off-site copy must be encrypted, using the PD-12 engine if SP-9 has concluded, otherwise an encrypted archive. WS-10 replaces this script.*
 
 **Order within WS-0:** QW-6 first (owner decision, 2026-11-26), then QW-1…QW-5.
 
@@ -169,7 +169,7 @@ Each workstream uses the framework's GOAL template sections. A workstream marked
 **Why:** This is the owner's added use case. It turns the inventory from a one-time snapshot into a living record. It is also what a "status" column in the client report needs (WS-3).
 
 **Success Criteria**
-- [ ] Every item has a `lifecycle_status` from a fixed set of **ten** values (confirmed by owner, 2026-11-24):
+- [x] Every item has a `lifecycle_status` from a fixed set of **ten** values (confirmed by owner, 2026-11-24):
 
   | Value | Meaning |
   |---|---|
@@ -184,15 +184,15 @@ Each workstream uses the framework's GOAL template sections. A workstream marked
   | `discarded` | Thrown away or recycled |
   | `missing` | Expected but not found (for example by verify mode) |
 
-- [ ] The existing `status` field (`confirmed`/`likely`, which means AI certainty) stays separate and unchanged.
-- [ ] A loan can be recorded with item, borrower name, optional contact, date out, expected return date and notes, and closed with a return date. Returning a loaned item sets status back to `in_home`. Loan history is kept, never overwritten.
-- [ ] Items `in_repair` can optionally record where and since when (in notes or a light field, decided in TODO refinement).
-- [ ] The dashboard has a **"Lent out"** panel listing open loans, with overdue loans highlighted. It also shows a count of items out of the house (`loaned` + `in_repair` + `in_vehicle` + `in_storage_offsite`).
-- [ ] Search results and the QR mobile page show status and loan info (for example "Loaned to Dave since 2026-10-02") next to location.
-- [ ] Search can filter by lifecycle status. By default it shows all statuses, with gone items (`donated`/`sold`/`given_away`/`discarded`) visibly marked.
-- [ ] Items and containers have a **last verified** date.
-- [ ] **Verify mode:** from a container page (or its QR scan), the user ticks items still present. Ticked items get `last_verified` set to today. Unticked items can be bulk-marked `missing`.
-- [ ] All status, loan and verification changes are written to `edit_history`.
+- [x] The existing `status` field (`confirmed`/`likely`, which means AI certainty) stays separate and unchanged.
+- [x] A loan can be recorded with item, borrower name, optional contact, date out, expected return date and notes, and closed with a return date. Returning a loaned item sets status back to `in_home`. Loan history is kept, never overwritten.
+- [x] Items `in_repair` can optionally record where and since when (in notes or a light field, decided in TODO refinement).
+- [x] The dashboard has a **"Lent out"** panel listing open loans, with overdue loans highlighted. It also shows a count of items out of the house (`loaned` + `in_repair` + `in_vehicle` + `in_storage_offsite`).
+- [x] Search results and the QR mobile page show status and loan info (for example "Loaned to Dave since 2026-10-02") next to location.
+- [x] Search can filter by lifecycle status. By default it shows all statuses, with gone items (`donated`/`sold`/`given_away`/`discarded`) visibly marked.
+- [x] Items and containers have a **last verified** date.
+- [x] **Verify mode:** from a container page (or its QR scan), the user ticks items still present. Ticked items get `last_verified` set to today. Unticked items can be bulk-marked `missing`.
+- [x] All status, loan and verification changes are written to `edit_history`.
 - [ ] Tests cover all ten statuses, status transitions, loan open/close, overdue calculation and verify mode.
 
 **In Scope:** status field, loans table, Lent-out panel, status in search, QR page and exports, last-verified date, verify mode.

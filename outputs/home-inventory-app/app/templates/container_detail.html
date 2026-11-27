@@ -10,6 +10,13 @@
         {% endif %}
         <h1>{{ box.name }}</h1>
         <p>{{ box.room_name }} · {{ box.north_ft }} ft from north wall, {{ box.east_ft }} ft from east wall, {{ box.elevation_ft }} ft above floor</p>
+        <p class="value-total">
+          Estimated value: <strong>${{ "{:,.2f}".format(value_totals.total) }}</strong>
+          {% if value_totals.unestimated %} · {{ value_totals.unestimated }} item{{ "s" if value_totals.unestimated != 1 }} not estimated{% endif %}
+          {% if box.children %} · includes containers inside{% endif %}
+          · <small>estimate, not an appraisal</small>
+        </p>
+        <p class="verified-date">Last verified: {{ box.last_verified_at or "never" }}</p>
       </div>
       <a class="button secondary" href="/capture/{{ box.public_id }}">Capture Photos</a>
       <a class="button secondary" href="/labels?ids={{ box.id }}">Print label</a>
@@ -56,6 +63,7 @@
     <section class="panel">
       <div class="section-heading">
         <h2>Items</h2>
+        <button type="button" class="button secondary" data-verify-start>Verify contents</button>
         <button type="button" class="button secondary" data-estimate-all-costs {% if not cost_lookup_enabled %}disabled title="Cost lookup is disabled (COST_LOOKUP_PROVIDER)"{% endif %}>Estimate all costs</button>
       </div>
       <form class="inline-add" data-add-item>
@@ -68,13 +76,20 @@
         </select>
         <button>Add</button>
       </form>
+      <div class="verify-bar" data-verify-bar hidden>
+        <span>Tick everything you can see, then save.</span>
+        <label class="checkbox"><input type="checkbox" data-verify-mark-missing> Mark unticked items as missing</label>
+        <button type="button" data-verify-save>Save verification</button>
+        <button type="button" class="secondary" data-verify-cancel>Cancel</button>
+      </div>
       <div class="item-table">
         {% for item in box["items"] %}
-        <div class="item-block">
+        <div class="item-block{% if item.is_gone %} item-gone{% endif %}">
           <div class="item-row" data-item-id="{{ item.id }}">
+            <input type="checkbox" class="verify-tick" data-verify-tick value="{{ item.id }}" hidden aria-label="Present">
             <input name="item_name" value="{{ item.item_name }}">
             <input name="quantity" type="number" value="{{ item.quantity }}">
-            <select name="status"><option {% if item.status == "confirmed" %}selected{% endif %}>confirmed</option><option {% if item.status == "likely" %}selected{% endif %}>likely</option></select>
+            <select name="status" title="AI certainty" aria-label="AI certainty"><option {% if item.status == "confirmed" %}selected{% endif %}>confirmed</option><option {% if item.status == "likely" %}selected{% endif %}>likely</option></select>
             <select name="category">
               <option value="">{{ item.category or "Category..." }}</option>
               {% for cat in categories %}<option {% if item.category == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
@@ -86,6 +101,38 @@
               <option value="">Move to...</option>
               {% for other in boxes %}{% if other.id != box.id %}<option value="{{ other.id }}">{{ other.path or other.name }}</option>{% endif %}{% endfor %}
             </select>
+          </div>
+          <div class="lifecycle-row" data-lifecycle-item="{{ item.id }}">
+            <span class="status-badge status-{{ item.lifecycle_status }}">{{ item.lifecycle_label }}</span>
+            {% if item.open_loan %}
+            <span>Loaned to {{ item.open_loan.borrower_name }} since {{ item.open_loan.loaned_at }}{% if item.open_loan.due_at %}, due {{ item.open_loan.due_at }}{% endif %}</span>
+            <button type="button" class="button secondary" data-return-loan data-loan-id="{{ item.open_loan.id }}">Returned</button>
+            {% elif item.status_note %}
+            <span class="status-note">{{ item.status_note }}</span>
+            {% endif %}
+            <small class="verified-date">Verified: {{ item.last_verified_at or "never" }}</small>
+            <details class="lifecycle-edit">
+              <summary>Change status</summary>
+              <div class="lifecycle-form">
+                <select data-lifecycle-select aria-label="Status">
+                  {% for value in lifecycle_statuses %}{% if value != "loaned" %}
+                  <option value="{{ value }}" {% if item.lifecycle_status == value %}selected{% endif %}>{{ lifecycle_labels[value] }}</option>
+                  {% endif %}{% endfor %}
+                </select>
+                <input data-lifecycle-note placeholder="Note (where, since when)" value="{{ item.status_note }}">
+                <button type="button" data-lifecycle-save>Save status</button>
+              </div>
+              {% if not item.is_gone and not item.open_loan %}
+              <div class="loan-form" data-loan-form>
+                <strong>Lend</strong>
+                <input name="borrower_name" placeholder="Borrower name" required>
+                <input name="borrower_contact" placeholder="Contact (optional)">
+                <label>Due <input name="due_at" type="date"></label>
+                <input name="notes" placeholder="Notes">
+                <button type="button" data-loan-save>Lend</button>
+              </div>
+              {% endif %}
+            </details>
           </div>
           <div class="cost-estimate-row">
             {% if item.latest_cost_estimate %}

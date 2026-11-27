@@ -215,8 +215,8 @@ Approved by the owner on 2026-11-26. "ACCEPTED" rows are in effect; "PROPOSED" r
 
   | # | Assumption | Risk if wrong | How to validate | Status |
   |---|---|---|---|---|
-  | 1 | The account running the "HomeInventory Data Backup" task can find `age.exe` (the winget link is per-user; SYSTEM can't see it) | Medium: off-site step fails | QW-6: call age by absolute path, or install it machine-wide; check the task's account | ⬜ |
-  | 2 | A full encrypted copy per run is small enough for the destination | Low: 47 MB today | QW-6: check size; keep the newest N off-site files | ⬜ |
+  | 1 | The account running the "HomeInventory Data Backup" task can find `age.exe` (the winget link is per-user; SYSTEM can't see it) | Medium: off-site step fails | QW-6: call age by absolute path, or install it machine-wide; check the task's account | ✅ task runs as `jpful`; script also falls back to the winget link |
+  | 2 | A full encrypted copy per run is small enough for the destination | Low: 47 MB today | QW-6: check size; keep the newest N off-site files | ✅ 46.9 MB; keep 3 |
   | 3 | A restore from the off-site file works on another computer | High if untested | QW-6 acceptance: decrypt and open the DB on a second machine or a clean folder | ⬜ |
   | 4 | The backup task's account can write to the OneDrive folder, and OneDrive is signed in and syncing when the task runs (on this PC `$env:OneDrive` points to a different Windows user profile from the one running these tools) | Medium: files written but never uploaded | QW-6: run the task under the account that owns OneDrive; check the file appears on onedrive.com | ⬜ |
 
@@ -281,4 +281,7 @@ Filled in as spikes run and decisions meet reality.
 
 | Date | Decision | Spike / evidence | Outcome |
 |---|---|---|---|
+| 2026-11-26 | PD-16 assumptions 1, 2, 4 | QW-6 run: task account `jpful` finds `age.exe` (winget link on its PATH) and owns the OneDrive folder; file is 46.9 MB | ✅ (scheduled run still to confirm, BL-008) |
+| 2026-11-26 | PD-16 assumption 3 | Restore in a clean folder with a throwaway key: integrity ok, counts match, 11/11 photos. Not yet on a second computer with the real key | ⬜ partly (BL-008) |
+| 2026-11-26 | SP-1 (item → photo backfill) | 48/56 items match exactly one photo via a confirmed detection; 8/56 have no matching detection but their container has exactly one photo; 0 ambiguous. **Rule for WS-2/WS-7:** link via the confirmed detection's photo; else, if the container has exactly one photo, link to it marked "inferred"; else leave unlinked | Answered |
 | 2026-11-26 | All §0 statuses | Owner review of DECISIONS.md | ACCEPTED rows in effect; PD-3, PD-4, PD-7, PD-12, PD-14 remain PROPOSED pending their spikes or phases |

@@ -195,6 +195,70 @@ if (boxDetail) {
     });
   });
 
+  // WS-1: lifecycle status, loans and verify mode.
+  const postJson = (url, method, body) => fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const errorText = async (res, fallback) => {
+    const body = await res.json().catch(() => ({}));
+    return body.detail || fallback;
+  };
+
+  document.querySelectorAll("[data-lifecycle-save]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = button.closest("[data-lifecycle-item]");
+      const res = await postJson(`/api/box-items/${row.dataset.lifecycleItem}/lifecycle`, "PATCH", {
+        lifecycle_status: row.querySelector("[data-lifecycle-select]").value,
+        status_note: row.querySelector("[data-lifecycle-note]").value,
+      });
+      if (res.ok) location.reload(); else toast(await errorText(res, "Status change failed"));
+    });
+  });
+
+  document.querySelectorAll("[data-loan-save]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = button.closest("[data-lifecycle-item]");
+      const form = button.closest("[data-loan-form]");
+      const data = {};
+      form.querySelectorAll("input").forEach((field) => { data[field.name] = field.value; });
+      if (!data.borrower_name) { toast("Borrower name is required"); return; }
+      const res = await postJson(`/api/box-items/${row.dataset.lifecycleItem}/loans`, "POST", data);
+      if (res.ok) location.reload(); else toast(await errorText(res, "Could not record the loan"));
+    });
+  });
+
+  document.querySelectorAll("[data-return-loan]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const res = await postJson(`/api/loans/${button.dataset.loanId}/return`, "POST", {});
+      if (res.ok) location.reload(); else toast(await errorText(res, "Could not mark returned"));
+    });
+  });
+
+  const verifyBar = document.querySelector("[data-verify-bar]");
+  const verifyTicks = () => document.querySelectorAll("[data-verify-tick]");
+  const setVerifyMode = (on) => {
+    if (verifyBar) verifyBar.hidden = !on;
+    verifyTicks().forEach((tick) => { tick.hidden = !on; tick.checked = false; });
+  };
+  document.querySelector("[data-verify-start]")?.addEventListener("click", () => setVerifyMode(true));
+  document.querySelector("[data-verify-cancel]")?.addEventListener("click", () => setVerifyMode(false));
+  document.querySelector("[data-verify-save]")?.addEventListener("click", async () => {
+    const present = [...verifyTicks()].filter((tick) => tick.checked).map((tick) => Number(tick.value));
+    const markMissing = document.querySelector("[data-verify-mark-missing]")?.checked || false;
+    const unticked = verifyTicks().length - present.length;
+    if (markMissing && unticked > 0 && !confirm(`Mark ${unticked} unticked item(s) as missing?`)) return;
+    const res = await postJson(`/api/boxes/${boxId}/verify`, "POST", { present_item_ids: present, mark_missing: markMissing });
+    if (res.ok) {
+      const json = await res.json();
+      toast(`Verified ${json.verified}, marked missing ${json.marked_missing}`);
+      setTimeout(() => location.reload(), 800);
+    } else {
+      toast(await errorText(res, "Verification failed"));
+    }
+  });
+
   document.querySelector("[data-estimate-all-costs]")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     if (button.disabled) return;

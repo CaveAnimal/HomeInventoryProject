@@ -28,6 +28,16 @@
     </div>
   </div>
   <aside class="metric-panel">
+    <h2>Household</h2>
+    <div class="metric-row">
+      <span>Estimated value</span>
+      <strong>${{ "{:,.2f}".format(value_totals.total) }}</strong>
+    </div>
+    {% if value_totals.unestimated %}
+    <div class="metric-row"><span>Items not estimated yet</span><strong>{{ value_totals.unestimated }}</strong></div>
+    {% endif %}
+    <div class="metric-row"><span>Items out of the house</span><strong>{{ out_of_house_count }}</strong></div>
+    <p class="metric-note">Estimates only, not an appraisal.</p>
     <h2>Rooms</h2>
     {% for room in rooms %}
       <div class="metric-row"><span>{{ room.room_name }}</span><strong>{{ room.count }}</strong></div>
@@ -35,6 +45,19 @@
       <p>No containers yet.</p>
     {% endfor %}
   </aside>
+</section>
+<section class="panel lent-out">
+  <h2>Lent out</h2>
+  {% for loan in open_loans %}
+  <div class="loan-row{% if loan.overdue %} overdue{% endif %}">
+    <a href="/boxes/{{ loan.box_id }}"><strong>{{ loan.item_name }}</strong></a>
+    <span>{{ loan.borrower_name }} since {{ loan.loaned_at }}</span>
+    {% if loan.due_at %}<span>{% if loan.overdue %}Overdue: {% endif %}due {{ loan.due_at }}</span>{% endif %}
+    <small>{{ loan.box_name }}</small>
+  </div>
+  {% else %}
+  <p>Nothing is lent out.</p>
+  {% endfor %}
 </section>
 <section class="split">
   <div>
