@@ -4,8 +4,8 @@
 ([abstract_goal_context_decisions_todo.md](../llm_vision/abstract_goal_context_decisions_todo.md)).
 See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for how this folder is organized.*
 
-- **Status:** REVISION 4. Owner review answers from 2026-11-24 are applied (§8), plus two owner directions: data protection (WS-10, PD-11, PD-12, [DATA_PROTECTION.md](DATA_PROTECTION.md)) and user-owned originals (WS-11, PD-13…PD-15, [USER_OWNED_ORIGINALS.md](USER_OWNED_ORIGINALS.md)). Awaiting final approval of the licensing direction (PD-9) and the placement of WS-10 and WS-11.
-- **Created:** 2026-11-24 · **Revised:** 2026-11-24
+- **Status:** **APPROVED** by owner on 2026-11-26 (revision 4). PD-9 and the WS-11 → WS-10 placement are confirmed (§8 row 9). Owner review answers from 2026-11-24 are applied (§8), plus two owner directions: data protection (WS-10, PD-11, PD-12, [DATA_PROTECTION.md](DATA_PROTECTION.md)) and user-owned originals (WS-11, PD-13…PD-15, [USER_OWNED_ORIGINALS.md](USER_OWNED_ORIGINALS.md)).
+- **Created:** 2026-11-24 · **Revised:** 2026-11-26
 - **Source of every goal below:** [docs/notes/summary/README.md](../../../notes/summary/README.md) (application review of 2026-11-23), §3.7 *Current limitations*, §4.1 *Sprint roadmap*, §4.2 *Business considerations*, §4.3 *Quick wins*. There are three additions, all from the owner and all recorded as scope changes: **WS-9 Licensing & Distribution** (§8, Q4), **WS-10 Data Protection** (§8, item 6) and **WS-11 User-Owned Originals** (§8, item 7).
 - **Deferred ideas:** items once classified ⚠️ MAYBE were moved to the [project backlog](../../backlog/README.md) (BL-001…BL-006) by owner decision.
 
@@ -37,7 +37,7 @@ Turn Home Inventory from a single-household personal tool into **licensable soft
 - **Primary:** clients **license the software** and run it on their own hardware. They own their data and edit their own inventory.
 - **Optional add-on:** the owner documents a client's home (photography + AI cataloging) and hands the finished inventory over to the client's licensed install.
 - **No immediate clients and no target date.** Work proceeds by priority, without deadline pressure.
-- The model is recorded as **PD-9** (§6) for formal acceptance in DECISIONS.md.
+- The model is recorded as **PD-9** (§6). **Confirmed by owner on 2026-11-26**; DECISIONS.md records it as ACCEPTED.
 
 ### Why This Matters (Business Value)
 - The application already does the hardest part (photos → AI suggestions → confirmed, searchable, located inventory). What's missing is mostly packaging: reports, status tracking, security and distribution (summary §1).
@@ -121,7 +121,7 @@ WS-0 through WS-11 as defined in §2 and §3.
 | WS-10 | Data Protection (backup strategy) | Owner direction §8 item 6 | P1 | Spike SP-9; WS-11 (what gets stored) | Coarse; detail in [DATA_PROTECTION.md](DATA_PROTECTION.md) |
 | WS-11 | User-Owned Originals (capture change) | Owner direction §8 item 7 | P1 | Spike SP-10 | Coarse; detail and workflow diagram in [USER_OWNED_ORIGINALS.md](USER_OWNED_ORIGINALS.md) |
 
-**Order (confirmed by owner, 2026-11-24; WS-11 and WS-10 placement proposed, awaiting confirmation):**
+**Order (confirmed by owner, 2026-11-24; WS-11 and WS-10 placement confirmed 2026-11-26):**
 `Phase 0 discovery + spikes → WS-0 → WS-1 → WS-11 → WS-10 → WS-3 (first version) → WS-2 → WS-4 → WS-5 → WS-6 → WS-9`. WS-7 runs alongside as needed, and WS-8 runs in parallel, led by the owner.
 
 - WS-11 comes before WS-10 because the backup design depends on what the app stores: working copies make backups about 74% smaller.
@@ -151,6 +151,8 @@ Each workstream uses the framework's GOAL template sections. A workstream marked
 - [ ] QW-4: The SQLite file-lock teardown failures in tests are fixed on Windows. The suite runs with only failures that have a written, accepted reason, or none at all.
 - [ ] QW-5: Failed cost lookups (outbound attempts) count toward `COST_LOOKUP_MONTHLY_LIMIT`, closing the accepted gap from cost_of_replacement.
 - [ ] QW-6: `backup-data.ps1` can copy each snapshot to an off-site destination (configurable path, for example a OneDrive-synced folder or the NAS), and logs whether that copy succeeded. *Interim measure for the owner's install. The off-site copy must be encrypted, using the PD-12 engine if SP-9 has concluded, otherwise an encrypted archive. WS-10 replaces this script.*
+
+**Order within WS-0:** QW-6 first (owner decision, 2026-11-26), then QW-1…QW-5.
 
 **In Scope:** the six items above.
 **Out of Scope:** ❌ new report formats (WS-3); ❌ changing which cost provider is used.
@@ -459,6 +461,7 @@ Every suggestion in the summary, plus owner-review additions, mapped to where it
 ## 5. SEQUENCING NOTES FOR TODO.md
 
 - **Phase 0 (Discovery):** write CONTEXT.md, seed DECISIONS.md with §6 and the §8 scope change. Run spikes SP-1 and SP-3 (needed soonest) and **SP-7** (client hardware: it decides whether licensing is viable and affects WS-4/6/9). Leave SP-2, SP-4, SP-6 and SP-8 until their workstream's phase is refined.
+- **QW-6 goes first** within WS-0 (owner decision, 2026-11-26, §8 row 10): the owner's data has no off-site or encrypted copy. It may use an encrypted archive now and move to the PD-12 engine after SP-9.
 - **Phases:** 1 = WS-0, 2 = WS-1, 3 = WS-11, 4 = WS-10, 5 = WS-3 (first version), then WS-2, WS-4, WS-5, WS-6, WS-9, each refined at the previous phase boundary. Run **SP-10** before Phase 3 is refined, and **SP-9** before Phase 4 is refined (or before QW-6, if its encrypted off-site copy should use the PD-12 engine).
 - **No deadline:** with no clients and no target date, quality and data safety come before speed. Don't skip spikes or tests to move faster.
 - **Check-ins** every 10 tasks and at each phase boundary should show working output: a screenshot of the Lent-out panel, a generated sample PDF, and so on.
@@ -511,16 +514,18 @@ Every suggestion in the summary, plus owner-review additions, mapped to where it
 | 1 | Is the recommended order right? | "The order is fine. No immediate clients." | §2 order confirmed; WS-9 appended last |
 | 2 | Target date for a first paying client? | "No target date." | §1 Business Model; §5 "no deadline" note |
 | 3 | Are the eight lifecycle statuses right? | Add `in_repair` and `in_vehicle`. | WS-1 now has ten statuses; PD-2 updated |
-| 4 | Should clients edit their own inventory, or only view it? | "I thought that the client would license this software?" | New business model: licensed, self-run software, so clients edit their own data. Added WS-9, PD-9, PD-10, SP-7, SP-8; WS-4 reframed around accounts, households and transfer; WS-8 updated (EULA, license tiers, support). **Needs owner confirmation via PD-9.** |
+| 4 | Should clients edit their own inventory, or only view it? | "I thought that the client would license this software?" | New business model: licensed, self-run software, so clients edit their own data. Added WS-9, PD-9, PD-10, SP-7, SP-8; WS-4 reframed around accounts, households and transfer; WS-8 updated (EULA, license tiers, support). PD-9 confirmed 2026-11-26 (row 9). |
 | 5 | Keep ⚠️ MAYBE items or move them to the backlog? | Move them to the backlog, and create a space for it. | Created [docs/AI_Planning/backlog/](../../backlog/README.md); BL-001…BL-006; PD-5 withdrawn |
-| 6 | *(Owner direction, after the review)* | "Decide on the least expensive way to keep the user data safe and secure, first on their own computer, on two media types, and then encrypted and backed up somewhere free or low cost as an encouraged option to the customer." | Added WS-10, PD-11, PD-12, SP-9, and [DATA_PROTECTION.md](DATA_PROTECTION.md). QW-6 and WS-4/WS-9 aligned. **WS-10 placement after WS-1 needs owner confirmation.** |
-| 7 | *(Owner direction, after the review)* | "Change how image capture works, so that we do not keep their originals. Users should be responsible for their originals and their backups of their originals." | Added WS-11, PD-13…PD-15, SP-10, and [USER_OWNED_ORIGINALS.md](USER_OWNED_ORIGINALS.md) with the workflow diagram. Measured: working copies average 1.42 MB vs 5.35 MB originals (−74%). WS-2, WS-10 and BL-003 aligned. **WS-11 placement (before WS-10) needs owner confirmation.** |
+| 6 | *(Owner direction, after the review)* | "Decide on the least expensive way to keep the user data safe and secure, first on their own computer, on two media types, and then encrypted and backed up somewhere free or low cost as an encouraged option to the customer." | Added WS-10, PD-11, PD-12, SP-9, and [DATA_PROTECTION.md](DATA_PROTECTION.md). QW-6 and WS-4/WS-9 aligned. WS-10 placement confirmed 2026-11-26 (row 9). |
+| 7 | *(Owner direction, after the review)* | "Change how image capture works, so that we do not keep their originals. Users should be responsible for their originals and their backups of their originals." | Added WS-11, PD-13…PD-15, SP-10, and [USER_OWNED_ORIGINALS.md](USER_OWNED_ORIGINALS.md) with the workflow diagram. Measured: working copies average 1.42 MB vs 5.35 MB originals (−74%). WS-2, WS-10 and BL-003 aligned. WS-11 placement confirmed 2026-11-26 (row 9). |
 | 8 | *(Owner decision, 2026-11-26)* | Can backup encryption be optional for the user? → "Skip the optional encryption for a future release and only if there is demand." | Encryption stays mandatory for every backup copy (PD-11 unchanged). Optional local-backup encryption parked as [BL-007](../../backlog/BL-007-optional-local-backup-encryption.md); DATA_PROTECTION.md §1 notes it. |
+| 9 | *(Owner approval, 2026-11-26)* | Approve PD-9 (licensed, self-run software plus optional documentation service), WS-11 right after WS-1, and WS-10 right after WS-11? → "Approve a, b and c." | GOALS.md marked **APPROVED**. PD-9 becomes ACCEPTED in DECISIONS.md. Order fixed: Phase 0 → WS-0 → WS-1 → WS-11 → WS-10 → WS-3 → WS-2 → WS-4 → WS-5 → WS-6 → WS-9. |
+| 10 | *(Owner decision, 2026-11-26)* | Do QW-6 first? Track the backup scripts? → "Yes to QW-6 first, commit both scripts." | QW-6 is the first task of WS-0 (§3 WS-0, §5). `backup-data.ps1` and `backup-e-drive.ps1` are now tracked in git. |
 
 ---
 
 ## Next Steps (framework)
-1. Owner confirms the licensing direction (PD-9) and the WS-11/WS-10 placement, and approves this revision → **Status: APPROVED**.
+1. ~~Owner confirms the licensing direction (PD-9) and the WS-11/WS-10 placement, and approves this revision → **Status: APPROVED**.~~ Done 2026-11-26.
 2. Create `CONTEXT.md` (current system from summary §3; target state per workstream).
 3. Create `DECISIONS.md` seeded with PD-1…PD-15 (PD-11/12 from DATA_PROTECTION.md, PD-13…15 from USER_OWNED_ORIGINALS.md), the inherited D-numbers, and a scope-change decision for the §8 answers.
 4. Create `TODO.md`: Phase 0 (including SP-7, SP-9 and SP-10), then full detail for WS-0 and WS-1 only.
