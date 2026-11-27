@@ -21,7 +21,15 @@ def expand_query(query: str) -> list[str]:
     return [term for term in terms if term]
 
 
-def search_items(conn: sqlite3.Connection, query: str = "", room: str = "", tag: str = "", category: str = "", min_confidence: float = 0) -> list[dict]:
+def search_items(
+    conn: sqlite3.Connection,
+    query: str = "",
+    room: str = "",
+    tag: str = "",
+    category: str = "",
+    min_confidence: float = 0,
+    lifecycle: str = "",
+) -> list[dict]:
     terms = expand_query(query) if query else [""]
     clauses = ["bi.confidence >= ?"]
     params: list = [min_confidence]
@@ -34,12 +42,19 @@ def search_items(conn: sqlite3.Connection, query: str = "", room: str = "", tag:
     if category:
         clauses.append("bi.category LIKE ?")
         params.append(f"%{category}%")
+    if lifecycle == "gone":
+        clauses.append("bi.lifecycle_status IN ('donated', 'sold', 'given_away', 'discarded')")
+    elif lifecycle == "out":
+        clauses.append("bi.lifecycle_status IN ('loaned', 'in_repair', 'in_vehicle', 'in_storage_offsite')")
+    elif lifecycle:
+        clauses.append("bi.lifecycle_status = ?")
+        params.append(lifecycle)
     if query:
         clauses.append("(" + " OR ".join(["bi.normalized_name LIKE ? OR bi.item_name LIKE ?" for _ in terms]) + ")")
         for term in terms:
             params.extend([f"%{normalize(term)}%", f"%{term}%"])
     sql = f"""
-        SELECT bi.*, b.name AS box_name, b.name AS container_name, b.public_id, b.tags AS box_tags,
+        SELECT bi.*, b.name AS box_name, b.last_verified_at AS box_last_verified_at, b.name AS container_name, b.public_id, b.tags AS box_tags,
                b.container_type, b.inaccessible,
                l.room_name, l.north_ft, l.east_ft, l.elevation_ft
         FROM box_items bi

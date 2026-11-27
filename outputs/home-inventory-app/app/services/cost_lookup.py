@@ -138,24 +138,36 @@ def ensure_lookup_allowed(item_name: str, category: str, opt_out: bool = False) 
         )
 
 
+def monthly_limit() -> int:
+    """Read COST_LOOKUP_MONTHLY_LIMIT when needed, not once at import."""
+    try:
+        return int(os.environ.get("COST_LOOKUP_MONTHLY_LIMIT", str(settings.COST_LOOKUP_MONTHLY_LIMIT)).strip())
+    except ValueError:
+        return settings.COST_LOOKUP_MONTHLY_LIMIT
+
+
 def ensure_budget_available(conn: sqlite3.Connection) -> None:
     """Raise before any network call once the monthly lookup cap is hit.
 
-    The cap is a derived ``COUNT`` query over ``cost_estimates.created_at``
-    for the current UTC calendar month (D-006) rather than a separate
-    counter table/row, so it resets naturally at each month boundary with
-    no extra bookkeeping.
+    Counts every outbound **attempt** this UTC month, successful or not
+    (QW-5), from ``cost_lookup_attempts``. A failed lookup still uses a
+    search credit, so it counts. The count resets at each month boundary.
     """
-    count = repository.count_cost_estimates_this_month(conn)
-    if count >= settings.COST_LOOKUP_MONTHLY_LIMIT:
+    limit = monthly_limit()
+    count = repository.count_cost_lookup_attempts_this_month(conn)
+    if count >= limit:
         raise CostLookupError(
-            f"Monthly cost-lookup limit reached ({settings.COST_LOOKUP_MONTHLY_LIMIT} lookups "
+            f"Monthly cost-lookup limit reached ({limit} lookups "
             "this month). Try again next month, or ask an administrator to raise "
             "COST_LOOKUP_MONTHLY_LIMIT."
         )
 
 
 class CostLookupProvider:
+    def makes_network_call(self) -> bool:
+        """True when estimate() will contact an outside service (counted by QW-5)."""
+        return False
+
     def estimate(self, item_name: str, category: str) -> CostEstimate:
         """Look up a current market replacement cost for a single item.
 
@@ -235,6 +247,9 @@ class TavilyCostLookupProvider(CostLookupProvider):
         self.bonsai_model = bonsai_vision_model()
         self.ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
         self.ollama_model = os.environ.get("COST_LOOKUP_OLLAMA_MODEL", "llama3.2")
+
+    def makes_network_call(self) -> bool:
+        return bool(self.api_key)
 
     def estimate(self, item_name: str, category: str) -> CostEstimate:
         # Defense in depth: even if a caller skips ensure_lookup_allowed(),
@@ -456,4 +471,11 @@ def estimate_replacement_cost(
     """
     ensure_lookup_allowed(item_name, category, opt_out)
     ensure_budget_available(conn)
-    return get_cost_provider().estimate(item_name, category)
+    provider = get_cost_provider()
+    if provider.makes_network_call():
+        # Count the attempt before the call and commit it at once, so a
+        # failed lookup (which the API turns into an error response and a
+        # rolled-back request) still counts toward the monthly limit (QW-5).
+        repository.record_cost_lookup_attempt(conn)
+        conn.commit()
+    return provider.estimate(item_name, category)

@@ -35,27 +35,70 @@ home-inventory-app/
     templates/
       *.html
   migrations/
-    001_initial.sql
+    001_initial.sql ... 009_*.sql   applied in order at startup
   tests/
-    test_core.py
+    test_*.py
   data/                     Created at runtime; ignored by git in normal use
   requirements.txt
 ```
 
 ## Setup
 
+The app lives in `outputs/home-inventory-app/` inside the repository. The scripts at the **repository root** do the setup and start it.
+
 ```powershell
-cd C:\Users\jpful\Documents\Codex\2026-05-31\how-much-work-can-we-do\outputs\home-inventory-app
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python -m app.database --seed
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+cd <repository root>          # the folder that contains start.ps1
+.\start.ps1                  # creates .venv if missing, installs requirements, runs migrations, starts the app
+.\start.ps1 -NoSeed          # same, without demo data
+.\stop.ps1                   # stops the app
 ```
 
-Then open [http://localhost:8000](http://localhost:8000).
+`start.ps1` serves the app on **port 1800**, bound to `0.0.0.0` so phones on the home network can reach it. Open [http://localhost:1800](http://localhost:1800).
 
-For iPhone access on your home network, find your computer's local IP address and open `http://YOUR-COMPUTER-IP:8000` on the phone. QR labels are generated using the host that created them, so create/print labels from the network address you want your phone to scan.
+Requirements:
+- Python 3.11 or 3.12 (only needed the first time, to create `.venv`).
+- The local vision model: a llama.cpp `llama-server` running Bonsai on `http://127.0.0.1:1080` (see Image Recognition). `.\start.ps1 -VisionProvider ollama` uses Ollama instead.
+
+Manual start, without the script:
+
+```powershell
+cd outputs\home-inventory-app
+..\..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 1800
+```
+
+For iPhone access on your home network, open `http://YOUR-COMPUTER-IP:1800` on the phone (the dashboard shows the address). QR labels are generated using the host that created them, so create/print labels from the network address you want your phone to scan.
+
+## Backups
+
+- `backup-data.ps1` (repository root) runs weekly as the "HomeInventory Data Backup" scheduled task. It makes a consistent, integrity-checked snapshot of `data/` in `D:\HomeInventoryBackups` (newest 30 kept, only when something changed).
+- After each snapshot it writes an **encrypted** copy (`<snapshot>.tar.age`, encrypted with [age](https://age-encryption.org) to the public key in `backup-offsite.recipient`) into the OneDrive folder `HomeInventoryBackups`, keeping the newest 3.
+- The private key that decrypts these files is **not** in the repository or OneDrive. Restore steps are in the header of `backup-data.ps1`.
+- Always back up `data/` before switching branches, resetting, or upgrading: a branch switch once destroyed the live database.
+
+## Status, Loans and Verify Mode
+
+Every item has a **Status** (where it physically is), separate from **AI certainty** (`confirmed` / `likely`, how sure the vision model was):
+
+| Status | Meaning |
+|---|---|
+| In home | At its recorded location (default) |
+| Loaned | Lent to someone; set by **Lend**, cleared by **Returned** |
+| In repair | Out for repair or service (add a note: where, since when) |
+| In vehicle | Kept in a vehicle |
+| In off-site storage | Storage unit or other off-site place |
+| Donated, Sold, Given away, Discarded | No longer owned; shown muted, left out of value totals |
+| Missing | Expected but not found |
+
+- **Change status / Lend / Returned:** under each item on the container page ("Change status").
+- **Lent out panel** on the dashboard lists open loans; overdue ones are red. The dashboard also shows how many items are out of the house.
+- **Verify contents:** on a container page, tick what you can see and save. Ticked items get today's "last verified" date; unticked items can be marked Missing.
+- **Search** filters by status ("Out of the house", "No longer owned", or one status).
+- Loan history is kept; every change is in the edit history.
+- **Value totals:** container pages and the dashboard show the total estimated value (latest estimate × quantity, confirmed items, nested containers included) and how many items aren't estimated yet.
+
+API: `PATCH /api/box-items/{id}/lifecycle`, `POST /api/box-items/{id}/loans`, `POST /api/loans/{id}/return`, `GET /api/loans?open=true`, `GET /api/box-items/{id}/loans`, `POST /api/boxes/{id}/verify`.
+
+The CSV export keeps its original 11 columns in order and appends `category`, `container_path`, `estimated_cost_usd`, `estimate_date`, `lifecycle_status`, `status_note`, `last_verified_at`, `loaned_to`, `loan_due`. `export.json` includes `loans`.
 
 ## Image Recognition
 
@@ -84,7 +127,7 @@ Confirmed items can get an estimated replacement cost for insurance documentatio
 ```powershell
 $env:COST_LOOKUP_PROVIDER="tavily"
 $env:COST_LOOKUP_API_KEY="your-tavily-api-key"
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+..\..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 1800
 ```
 
 ### Environment variables
@@ -93,7 +136,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 |----------|---------|---------|
 | `COST_LOOKUP_PROVIDER` | `disabled` | `tavily` enables the feature. `disabled`, unset, or any unrecognized value resolves to a no-op provider that makes zero network calls (the kill switch). |
 | `COST_LOOKUP_API_KEY` | unset | Search-provider API key. Falls back to `TAVILY_API_KEY` if unset. |
-| `COST_LOOKUP_MONTHLY_LIMIT` | `50` | App-side monthly budget guard. Once this many lookups have been recorded in the current calendar month, further lookups are refused with a clear error until the month rolls over. |
+| `COST_LOOKUP_MONTHLY_LIMIT` | `50` | App-side monthly budget guard. Every outbound lookup **attempt** counts, including failed ones (they still use a search credit). Once this many attempts have been made in the current calendar month, further lookups are refused with a clear error until the month rolls over. Read when needed, so a change takes effect without a restart. |
 | `COST_LOOKUP_LLM` | `bonsai` | Local model for the extraction step: `bonsai` (uses `BONSAI_URL`) or `ollama`. |
 | `COST_LOOKUP_OLLAMA_MODEL` | `llama3.2` | Extraction model when `COST_LOOKUP_LLM=ollama`. Reuses `OLLAMA_URL`. |
 
@@ -129,7 +172,7 @@ Estimates are insert-only history, never overwritten: re-estimating an item adds
 
 The `/capture` page is the iPhone-first entry point:
 
-1. Open `http://YOUR-COMPUTER-IP:8000/capture` on the phone.
+1. Open `http://YOUR-COMPUTER-IP:1800/capture` on the phone.
 2. Tap **Create & Start Capturing** to make a new container inline (default type `box`, QR label generated automatically), or pick an existing one.
 3. Take a photo. The strict detection list appears on the same page with item name, editable count, confidence, and category.
 4. Uncheck wrong items, fix counts, then tap **Confirm Selected Items**. Confirmed items are saved to inventory with status `confirmed`; unchecked ones are recorded as `dismissed` and never enter inventory. Both are tracked in edit history.
@@ -166,7 +209,7 @@ There is no way for a local web app to connect directly to Ray-Ban Meta glasses:
 - **Move item:** from a box detail page, choose destination box and move.
 - **Update location:** edit the location section on the box detail page.
 - **Add more photos:** upload more photos on an existing box; the app creates new suggestions.
-- **Backup:** use `Export` links for JSON or CSV.
+- **Backup:** automatic, see Backups above. `Export` links give JSON or CSV copies too.
 
 ## Tests
 

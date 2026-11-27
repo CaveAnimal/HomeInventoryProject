@@ -260,3 +260,27 @@ em {
   .label-sheet { grid-template-columns: repeat(2, 1fr); gap: 12mm; }
   .print-label { break-inside: avoid; min-height: 115mm; border: 1px solid #111; }
 }
+
+/* QW-2: value totals */
+.value-total { margin: 4px 0; }
+.metric-note { color: var(--muted); font-size: 0.8rem; margin: 4px 0 12px; }
+.verified-date { color: var(--muted); font-size: 0.8rem; }
+
+/* WS-1: lifecycle status, loans, verify mode */
+.lifecycle-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 0.85rem; }
+.lifecycle-row button { min-height: 30px; padding: 4px 10px; font-size: 0.85rem; }
+.lifecycle-edit summary { cursor: pointer; color: var(--muted); }
+.lifecycle-form, .loan-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px; }
+.status-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; border: 1px solid var(--line); }
+.status-in_home { background: #e8f5e9; color: #1b5e20; }
+.status-loaned, .status-in_repair, .status-in_vehicle, .status-in_storage_offsite { background: #fff8e1; color: #8a5a00; }
+.status-missing { background: #ffebee; color: #b71c1c; }
+.status-donated, .status-sold, .status-given_away, .status-discarded { background: #eceff1; color: #455a64; }
+.status-note { color: var(--muted); }
+.item-gone { opacity: 0.6; }
+.verify-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px; margin-bottom: 8px; border: 1px dashed var(--line); border-radius: 8px; }
+.verify-tick { width: 22px; height: 22px; }
+.lent-out { margin: 16px 0; }
+.loan-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.loan-row:last-child { border-bottom: 0; }
+.loan-row.overdue { color: #b71c1c; }
